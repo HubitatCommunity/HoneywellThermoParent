@@ -36,8 +36,6 @@ import groovy.transform.Field
 
 metadata {
 	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "Eric Thomas, lg kahn, C Steele") {
-///		capability "Configuration"
-///		capability "Initialize" 
 		command "addThermostat"
 
 /* -= Attribute List =-
@@ -50,14 +48,6 @@ metadata {
  	poll, refresh, setCoolingSetpoint, setFollowSchedule, setHeatingSetpoint, setThermostatFanMode, setThermostatMode]
 
 */	
-/// delete this section before Release:
-		command 	"WipeState"
-		command	"WipeData"
-		command 	"ClearSchedule"
-		command 	"removeChildDevices"
-		command 	"installed"
-		command 	"listThermostats"
-// delete section above before Release
 	}
 
 	preferences {
@@ -67,16 +57,6 @@ metadata {
 	   input name: "descTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
 	}
 }
-
-
-/// delete this section before Release:
-#include csteele.wipes // <-- delete this before Release also
-
-void listThermostats() {
-	def cd = getChildDevices()?.findAll { it.deviceNetworkId > "${device.id}-${type()}"}
-	if (debugOutput) log.debug "listThermostats: $cd"
-}
-// delete section above before Release
 
 
 
@@ -90,7 +70,7 @@ void updated(){
 	log.warn "debug logging is: ${debugOutput == true}"
 	log.warn "description logging is: ${descTextEnable == true}"
 	log.info "Count of Children: $numChild"
-///	if (debugOutput) runIn(1800,logsOff)
+	if (debugOutput) runIn(1800,logsOff)
 }
 
 // parse events into attributes
@@ -312,7 +292,7 @@ void componentSetFollowSchedule(cd) {
 
 List<String> configure() {
 	log.warn "configure..."
-///	runIn(1800,logsOff)
+	runIn(1800,logsOff)
 }
 
 
