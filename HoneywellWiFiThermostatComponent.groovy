@@ -14,7 +14,8 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  * 
- * csteele: v2.0.2   renamed 
+ * csteele: v2.0.2   corrected logic errors in Poll
+ *			   renamed 
  *			   adjusted Schedule() to be from the current minute.
  *				as in:  0 20/30 * ? * * == "At second :00, every 30 minutes starting at minute :20, of every hour",
  *				assuming Poll was started at minute 20 of the current hour
@@ -87,6 +88,7 @@ void updated() {
 	log.warn "description logging is: ${txtEnable == true}"
 	log.debug "device: $device.deviceNetworkId"
 	runInMillis( 200, parentUpdate)
+	runInMillis( 400, poll)
 }
 
 void parentUpdate() {
@@ -94,18 +96,19 @@ void parentUpdate() {
 	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, setPermHold, pollIntervals)
 }
 
+
 void poll() {
-	if (txtEnable) log.debug "received Poll request from ${this.displayName} Poll Interval: $pollIntervals"
+	if (txtEnable) log.debug "received Poll request from ${this.displayName ?: (this.device.label ?: this.device.name)} Poll Interval: $pollIntervals"
+	unschedule(refresh) // maybe poll interval is now zero
 	// build out a cron string for pollInterval options 1 min -- 60 min
-	def boutNow = new Date(new Date().time)
-	Integer pIminute = pollIntervals.toInteger() / 60 // find minutes
-	Integer pIhour = pIminute / 60 // find hours
+	if (pollIntervals > "0") { 
+	    def boutNow = new Date(new Date().time)
+	    Integer pIminute = pollIntervals.toInteger() / 60 // find minutes
+	    Integer pIhour = pIminute / 60 // find hours
 
-	String pIntMinute = (pIminute == 60 || pIminute == 0) ? "${boutNow.minutes}" : "${boutNow.minutes}/$pIminute"
-	String pIntHour = (pIhour < 1) ? "*" : "*/$pIhour"
+	    String pIntMinute = (pIminute == 60 || pIminute == 0) ? "${boutNow.minutes}" : "${boutNow.minutes}/$pIminute"
+	    String pIntHour = (pIhour < 1) ? "*" : "*/$pIhour"
 
-	if (pollIntervals) { 
-		unschedule(runPoll)
       	schedule("0 $pIntMinute $pIntHour ? * *", refresh) 
 	}
 
