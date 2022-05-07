@@ -14,6 +14,7 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  * 
+ * csteele: v2.0.3   corrected PermHold to be a code value
  * csteele: v2.0.2   corrected logic errors in Poll
  *			   renamed 
  *			   adjusted Schedule() to be from the current minute.
@@ -27,7 +28,7 @@
  *                    added fanOperatingState Attribute.
 **/
 
- public static String version()     {  return "v2.0.2"  }
+ public static String version()     {  return "v2.0.3"  }
 
 
 metadata {
@@ -92,8 +93,9 @@ void updated() {
 }
 
 void parentUpdate() {
+	if (setPermHold == "Permanent") { PermHoldCode = 2 } else { PermHoldCode = 1 }
 	String cd = device.deviceNetworkId
-	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, setPermHold, pollIntervals)
+	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, PermHoldCode, pollIntervals)
 }
 
 
