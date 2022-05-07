@@ -2,7 +2,6 @@
         "packageName": "Honeywell Thermo Parent",
         "releaseNotes": "2022-05-03 csteele\n -initial commit",
         "author": "CSteele",
-        "version": "2.0.0",
         "minimumHEVersion": "2.0.0",
         "dateReleased": "2022-05-03",
         "category": "Control",
@@ -10,6 +9,7 @@
         "drivers": [{
                 "id": "f991de80-143f-49c8-a127-7996e972ed58",
                 "name": "Honeywell Thermo Parent",
+                "version": "2.0.3",
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/master/HoneywellThermoParent.groovy",
                 "required": true,
@@ -19,6 +19,7 @@
         {
                 "id": "a9695dd9-984c-49bc-a916-2c2f21013d29",
                 "name": "Honeywell WiFi Thermostat Component",
+                "version": "2.0.3",
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/master/HoneywellWiFiThermostatComponent.groovy",
                 "required": true,
