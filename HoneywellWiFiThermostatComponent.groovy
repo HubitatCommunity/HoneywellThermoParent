@@ -1,5 +1,5 @@
 /**
- * IMPORT URL: 
+ * IMPORT URL: https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy
  *
  *  Total Comfort API
  *   
@@ -59,7 +59,7 @@ metadata {
         command    "coolLevelUp"
         command    "coolLevelDown"
         command    "setFollowSchedule"
-        command	 "setLastRunningMode"
+        command	 "setLastRunningMode"	// does nothing in this UI
 
 /* -= Attribute List =-
  	[thermostatFanMode, humidifierLowerLimit, supportedThermostatFanModes, supportedThermostatModes, followSchedule, humidifierSetPoint, thermostatSetpoint, 
@@ -126,7 +126,7 @@ void installed() {
 void parse(String description) { log.warn "parse(String description) not implemented" }
 
 void parse(List description) {
-    description.each {
+	description.each {
             if (txtEnable) log.info it.descriptionText
             sendEvent(it)
     }
@@ -213,10 +213,7 @@ void heatLevelUp() {
 	lrM to capture the button push, while Parent will call lrM with (mode).
 */
 
-def setLastRunningMode() {
-    log.info "lrM button pushed."
-}
-
+def setLastRunningMode() { log.info "lrM button pushed." }
 def setLastRunningMode (mode) {
 	String lrm = getDataValue("lastRunningMode")
 	if (mode.contains("auto") || mode.contains("off") && lrm != "heat") { updateDataValue("lastRunningMode", "heat") }
