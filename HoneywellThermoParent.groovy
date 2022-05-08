@@ -130,6 +130,10 @@ void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	getStatus(cd)
 }
 
+// a version of refresh for those Outdoor sensors to use.
+void componentRefresh(cd) { 
+	log.info "Component Refresh button pushed."
+}
 
 // Thermostat mode section
 void componentOff(cd) {
