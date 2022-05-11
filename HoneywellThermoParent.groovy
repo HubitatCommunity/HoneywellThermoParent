@@ -15,6 +15,10 @@
  *
  *
  *
+ * csteele: v2.0.4   refactored "getStatus" and "getHumidityStatus" to minimize try/catch scope
+ *			     reorganized methods to clump Fan methods together, to clump Mode methods together, etc.
+ *			     "getHumidityStatus" using asynchttpGet
+ *			     refactored all the set heat/cool/up/down 
  * csteele: v2.0.3   refactored "setStatus" to accumulate UI button clicks
  *			     clarified some status/log messages
  *			     added both Outdoor Child devices
@@ -29,7 +33,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.3"  }
+ public static String version()	{  return "v2.0.4"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -59,6 +63,7 @@ metadata {
 	   input name: "descTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
 	}
 }
+
 
 
 void updated(){
@@ -104,13 +109,6 @@ def createOutdoorChild(cd, oType) {
 	cd = addChildDevice("hubitat", "Generic Component $oType Sensor", "${cd.id}-$oType", [name: "Outdoor $oType", isComponent: true])
 	//log.debug "createOutdoorChild: $cd.deviceNetworkId, $cd.displayName"
 	return cd
-}
-
-
-void refresh(cd)
-{
-	if (debugOutput) log.debug "Refresh request from device ${cd.displayName}. This will refresh all component devices."
-	getStatus(cd)
 }
 
 
@@ -177,31 +175,20 @@ void setThermostatMode(cd, mode) {
 	    	cd.setLastRunningMode(mode) 
 	}
 }
-// end of section
-
-// Heat/Cool Set/Up/Down section
-void componentSetThermostatFanMode(cd, mode) {
-	if (debugOutput) log.info "received Fan Mode request from ${cd.displayName}"
-	setThermostatFanMode(cd, mode)
-}
 
 void componentSetThermostatMode(cd, mode) {
 	if (debugOutput) log.info "received Thermostat Mode request from ${cd.displayName}"
 	setThermostatMode(cd, mode)
 }
+// end of section
 
-void componentSetCoolingSetpoint(cd, val) {
+
+// Heat/Cool Set/Up/Down section
+void componentSetCoolingSetpoint(cd, float val) {
 	if (debugOutput) log.info "received Cooling Setpoint request from ${cd.displayName}: $val"
-      if (val < state.coolLowerSetptLimit) 
-      {
-          val = state.coolLowerSetptLimit
-          log.warn "Set Point out of range, low" 
-      }
-      if (val > state.coolUpperSetptLimit) 
-      {
-          val = state.coolUpperSetptLimit
-          log.warn "Set Point out of range, high" 
-      }
+	float valIn = val // for limits check
+	val = ensureRange( val.toFloat(), state.coolLowerSetptLimit.toFloat(), state.coolUpperSetptLimit.toFloat() )
+	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
 	String[] dniParts = cd.deviceNetworkId.split("_")
 	deviceSettingInitDB(cd, state.childParamMap."${dniParts[1]}".setPermHold) 	 // reset all params, then set individually
 	state.deviceSetting."${dniParts[1]}".CoolSetpoint = val
@@ -209,18 +196,11 @@ void componentSetCoolingSetpoint(cd, val) {
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:val, descriptionText:"${cd.displayName} Cooling Setpoint is ${val}", unit:"°"]])
 }
 
-void componentSetHeatingSetpoint(cd, val) {
+void componentSetHeatingSetpoint(cd, float val) {
 	if (debugOutput) log.info "received Heating Setpoint request from ${cd.displayName}: $val"
-      if (val < state.heatLowerSetptLimit) 
-      {
-          val = state.heatLowerSetptLimit
-          log.warn "Set Point out of range, low" 
-      }
-      if (val > state.heatUpperSetptLimit) 
-      {
-          val = state.heatUpperSetptLimit
-          log.warn "Set Point out of range, high" 
-      }
+	float valIn = val // for limits check
+	val = ensureRange( val.toFloat(), state.heatLowerSetptLimit.toFloat(), state.heatUpperSetptLimit.toFloat() )
+	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
 	String[] dniParts = cd.deviceNetworkId.split("_")
 	deviceSettingInitDB(cd, state.childParamMap."${dniParts[1]}".setPermHold) 	 // reset all params, then set individually
 	state.deviceSetting."${dniParts[1]}".HeatSetpoint = val
@@ -229,56 +209,45 @@ void componentSetHeatingSetpoint(cd, val) {
 }
 
 void componentHeatLevelDown(cd) {
-	if (location.temperatureScale == "F")  {
-		val = cd.currentValue("heatingSetpoint") - 1
-	} else {
-		val = cd.currentValue("heatingSetpoint") - 0.5
-	}
+	float val = (location.temperatureScale == "F") ? cd.currentValue("heatingSetpoint") - 1 : cd.currentValue("heatingSetpoint") - 0.5
 	componentSetHeatingSetpoint(cd, val)
 }
 
 void componentHeatLevelUp(cd) {
-	if (location.temperatureScale == "F")  {
-		val = cd.currentValue("heatingSetpoint") + 1
-	} else {
-		val = cd.currentValue("heatingSetpoint") + 0.5
-	}
+	float val = (location.temperatureScale == "F") ? cd.currentValue("heatingSetpoint") + 1 : cd.currentValue("heatingSetpoint") + 0.5
 	componentSetHeatingSetpoint(cd, val)
 }
 
 void componentCoolLevelDown(cd) {
-	if (location.temperatureScale == "F")  {
-		val = cd.currentValue("coolingSetpoint") - 1
-	} else { 
-		val = cd.currentValue("coolingSetpoint") - 0.5
-	}
+	float val = (location.temperatureScale == "F") ? cd.currentValue("coolingSetpoint") - 1 : cd.currentValue("coolingSetpoint") - 0.5
 	componentSetCoolingSetpoint(cd, val)
 }
 
 void componentCoolLevelUp(cd) {
-	if (location.temperatureScale == "F")  {
-		val = cd.currentValue("coolingSetpoint") + 1
-	} else { 
-		val = cd.currentValue("coolingSetpoint") + 0.5
-	}
+	float val = (location.temperatureScale == "F") ? cd.currentValue("coolingSetpoint") + 1 : cd.currentValue("coolingSetpoint") + 0.5
 	componentSetCoolingSetpoint(cd, val)
 }
 // end of section
 
 
 // Fan mode section
+void componentSetThermostatFanMode(cd, mode) {
+	if (debugOutput) log.info "received Fan Mode request from ${cd.displayName}"
+	setThermostatFanMode(cd, mode)
+}
+
 void componentFanAuto(cd) {
-	if (debugOutput) log.info "received FanAuto request from ${cd.displayName}"
+	if (debugOutput) log.info "received Fan Auto request from ${cd.displayName}"
 	setThermostatFanMode(cd, 'auto')
 }
 
 void componentFanCirculate(cd) {
-	if (debugOutput) log.info "received Circulate request from ${cd.displayName}"
+	if (debugOutput) log.info "received Fan Circulate request from ${cd.displayName}"
 	setThermostatFanMode(cd, 'circulate')
 }
 
 void componentFanOn(cd) {
-	if (debugOutput) log.info "received FanOn request from ${cd.displayName}"
+	if (debugOutput) log.info "received Fan On request from ${cd.displayName}"
 	setThermostatFanMode(cd, 'on')
 }
 
@@ -343,6 +312,7 @@ def getStatus(cd) {
 	String[] dniParts = cd.deviceNetworkId.split("_")
 	if (debugOutput) log.debug "enable outside temps = ${state.childParamMap."${dniParts[1]}".enableOutdoorTemps}"
 	def today = new Date()
+	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 	//if (debugOutput) log.debug "https://${tccSite()}/portal/Device/CheckDataSession/${settings.honeywelldevice}?_=$today.time"
 
 	def params = [
@@ -369,140 +339,16 @@ def getStatus(cd) {
 	asynchttpGet("getStatusHandler", params, pData)
 }
 
-def getStatusHandler(resp, data) {
+def getStatusHandler (resp, data) {
 	try {
 		def cdd = data["cd"]
 		def cd = getChildDevice(cdd.deviceNetworkId)
 		String[] dniParts = cd.deviceNetworkId.split("_")
 		if (resp.getStatus() == 200 || resp.getStatus() == 207) {
-			def setStatusResult = parseJson(resp.data)
-
-			if (debugOutput) { 
-			    log.debug "Request was successful, $resp.status"
-			    log.debug "data: $setStatusResult, rdata: $data"
-			    log.debug "ld: $setStatusResult.latestData.uiData"
-			    log.debug "ld: $setStatusResult.latestData.fanData"
-			}
-
-			def curTemp = setStatusResult.latestData.uiData.DispTemperature
-			def switchPos = setStatusResult.latestData.uiData.SystemSwitchPosition
-			def coolSetPoint = setStatusResult.latestData.uiData.CoolSetpoint
-			def heatSetPoint = setStatusResult.latestData.uiData.HeatSetpoint
-			def statusCool = setStatusResult.latestData.uiData.StatusCool
-			def statusHeat = setStatusResult.latestData.uiData.StatusHeat
-			def Boolean hasIndoorHumid= setStatusResult.latestData.uiData.IndoorHumiditySensorAvailable
-			def curHumidity = setStatusResult.latestData.uiData.IndoorHumidity
-			def Boolean hasOutdoorHumid = setStatusResult.latestData.uiData.OutdoorHumidityAvailable
-			def Boolean hasOutdoorTemp = setStatusResult.latestData.uiData.OutdoorTemperatureAvailable
-			def Boolean isScheduleCapable = setStatusResult.latestData.uiData.ScheduleCapable
-			def curOutdoorHumidity = setStatusResult.latestData.uiData.OutdoorHumidity
-			def curOutdoorTemp = setStatusResult.latestData.uiData.OutdoorTemperature
-			// EquipmentOutputStatus = 0 off 1 heating 2 cooling
-			def equipmentStatus = setStatusResult.latestData.uiData.EquipmentOutputStatus	
-			def holdTime = setStatusResult.latestData.uiData.TemporaryHoldUntilTime
-			def vacationHoldMode = setStatusResult.latestData.uiData.IsInVacationHoldMode
-			def vacationHold = setStatusResult.latestData.uiData.VacationHold
-			def Boolean isEmergencyHeatAllowed = setStatusResult.latestData.uiData.SwitchEmergencyHeatAllowed
-
-			state.heatLowerSetptLimit = setStatusResult.latestData.uiData.HeatLowerSetptLimit 
-			state.heatUpperSetptLimit = setStatusResult.latestData.uiData.HeatUpperSetptLimit 
-			state.coolLowerSetptLimit = setStatusResult.latestData.uiData.CoolLowerSetptLimit 
-			state.coolUpperSetptLimit = setStatusResult.latestData.uiData.CoolUpperSetptLimit 
-			
-			def fanMode = setStatusResult.latestData.fanData.fanMode
-			def fanIsRunning = setStatusResult.latestData.fanData.fanIsRunning
-
-			if (debugOutput) {
-				log.debug "got holdTime = $holdTime"
-				log.debug "got Vacation Hold = $vacationHoldMode"
-				log.debug "got scheduleCapable = $isScheduleCapable"
-				log.debug "got Emergency Heat = $isEmergencyHeatAllowed"
-			}
-
-			if (holdTime != 0) {
-				if (debugOutput) log.debug "sending temporary hold"
-				getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"TemporaryHold", descriptionText:"${cd.displayName} was Set to Temporary Hold"]])
-			}
-
-			if (vacationHoldMode == true) {
-				if (debugOutput) log.debug "sending vacation hold"
-				getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"VacationHold", descriptionText:"${cd.displayName} was Set to Vacation Hold"]])
-			}
-
-			if (vacationHoldMode == false && holdTime == 0 && isScheduleCapable == true ) {
-				if (debugOutput) log.debug "Sending following schedule"
-				getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"FollowingSchedule", descriptionText:"${cd.displayName} was Set to Following Schedule"]])
-			}
-
-			if (hasIndoorHumid == false) { curHumidity = 0 }
-
-			// set fan and operating state
-			def fanState = "idle"
-
-			if (fanIsRunning) {
-				fanState = "on";
-			} 
-
-			def operatingState = [ 0: 'idle', 1: 'heating', 2: 'cooling' ][equipmentStatus] ?: 'idle'
-
-			if ((state.childParamMap."${dniParts[1]}".haveHumidifier != 'Yes') && (fanIsRunning == true) && (equipmentStatus == 0))
-			{ 
-			    operatingState = "fan only"
-			} else if ((state.childParamMap."${dniParts[1]}".haveHumidifier == 'Yes')  && (fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
-			    operatingState = "Humidifying"
-			}
-
-			logInfo("Get Operating State: $operatingState - Fan to $fanState")
-
-			//fan mode 0=auto, 2=circ, 1=on, 3=followSched
-
-			n = [ 0: 'auto', 2: 'circulate', 1: 'on', 3: 'followSchedule' ][fanMode]
-			getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatFanMode", value:n, descriptionText:"${cd.displayName} Fan was Set to $n"]])
-
-			n = [ 1: 'heat', 2: 'off', 3: 'cool', 5: 'auto', 4: 'emergency heat' ][switchPos] ?: 'auto'
-			getChildDevice(cd.deviceNetworkId).parse([[name:"temperature", value:curTemp, descriptionText:"${cd.displayName} Temperature was Set to $curTemp", unit: "°${location.temperatureScale}"]])
-			getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value:n, descriptionText:"${cd.displayName} Mode was Set to $n"]])
-			cd.setLastRunningMode(n) // lastRunningMode in the Child
-
-			//Send events 
-			getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value:operatingState, descriptionText:"${cd.displayName} Op State was Set to $operatingState"]])
-			getChildDevice(cd.deviceNetworkId).parse([[name:"fanOperatingState", value:fanState, descriptionText:"${cd.displayName} Fan was Set to $fanState"]])
-			getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:coolSetPoint, descriptionText:"${cd.displayName} Cooling was Set to $coolSetPoint", unit:"°${location.temperatureScale}"]])
-			getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value:heatSetPoint, descriptionText:"${cd.displayName} Heating was Set to $heatSetPoint", unit:"°${location.temperatureScale}"]])
-			getChildDevice(cd.deviceNetworkId).parse([[name:"humidity", value:curHumidity as Integer, descriptionText:"${cd.displayName} Humidity was Set to $curHumidity", unit:"%"]])
-
-			if (state.childParamMap."${dniParts[1]}".haveHumidifier == 'Yes') {
-				// kludge to figure out if humidifier is on, fan has to be auto, and if fan is on but not heat/cool and we have enabled the humidifyer it should be humidifying"
-				if (debugOutput) log.debug "fanIsRunning = $fanIsRunning, equip status = $equipmentStatus, fanMode = $fanMode, temp = $curTemp, humidity = $curHumidity"
-			     
-			 	if ((fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
-					if (debugOutput) log.debug "Humidifier is On"
-					getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Humidifying", descriptionText:"${cd.displayName} Humidifier was Set to Humidifying"]])
-				} else {
-					if (debugOutput) log.debug "Humidifier is Off"
-					getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Idle", descriptionText:"${cd.displayName} Humidifier was Set to Idle"]])
-				}
-			}
-
-			def now = new Date().format('MM/dd/yyyy h:mm a', location.timeZone)
-			getChildDevice(cd.deviceNetworkId).parse([[name:"lastUpdate", value:now, descriptionText:"${cd.displayName} Last Update was Set to $now"]])
-			
-			if (state.childParamMap."${dniParts[1]}".enableOutdoorTemps == "Yes") {
-				if (hasOutdoorHumid) {
-					setOutdoorHumidity(cd, curOutdoorHumidity)
-					def cdx = getChildDevice("${cd.id}-Humidity")
-					getChildDevice(cdx.deviceNetworkId).parse([[name:"outdoorHumidity", value:curOutdoorHumidity as Integer, descriptionText:"${cdx.displayName} Outdoor Humidity was Set to $curOutdoorHumidity", unit:"%"]])
-				}
-			
-				if (hasOutdoorTemp) {
-					setOutdoorTemperature(cd, curOutdoorTemp)
-					def cdx = getChildDevice("${cd.id}-Temperature")
-					getChildDevice(cdx.deviceNetworkId).parse([[name:"outdoorTemperature", value:curOutdoorTemp as Integer, descriptionText:"${cdx.displayName} Outdoor Temperature was Set to $curOutdoorTemp", unit:"°${location.temperatureScale}"]])
-				}
-			}
-			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
-		
-		} else {
+			Map setStatusResult = parseJson(resp.data)
+			getStatusDistrib(cd, setStatusResult)
+		}
+		else {
 			if (descTextEnable) log.info "TCC getStatus failed for ${cd.displayName}"
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 		}
@@ -512,6 +358,105 @@ def getStatusHandler(resp, data) {
 		if (descTextEnable) log.info "TCC getStatus failed for ${cd.displayName}"
 		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
     }	
+}
+
+
+def getStatusDistrib(cd, Map decodedResult) {
+
+	def curTemp = decodedResult.latestData.uiData.DispTemperature
+	def switchPos = decodedResult.latestData.uiData.SystemSwitchPosition
+	def coolSetPoint = decodedResult.latestData.uiData.CoolSetpoint
+	def heatSetPoint = decodedResult.latestData.uiData.HeatSetpoint
+	def statusCool = decodedResult.latestData.uiData.StatusCool
+	def statusHeat = decodedResult.latestData.uiData.StatusHeat
+	Boolean hasIndoorHumid = decodedResult.latestData.uiData.IndoorHumiditySensorAvailable
+	def curHumidity = decodedResult.latestData.uiData.IndoorHumidity
+	Boolean hasOutdoorHumid = decodedResult.latestData.uiData.OutdoorHumidityAvailable
+	Boolean hasOutdoorTemp = decodedResult.latestData.uiData.OutdoorTemperatureAvailable
+	Boolean isScheduleCapable = decodedResult.latestData.uiData.ScheduleCapable
+	def curOutdoorHumidity = decodedResult.latestData.uiData.OutdoorHumidity
+	def curOutdoorTemp = decodedResult.latestData.uiData.OutdoorTemperature
+	// EquipmentOutputStatus = 0 off 1 heating 2 cooling
+	def equipmentStatus = decodedResult.latestData.uiData.EquipmentOutputStatus	
+	def holdTime = decodedResult.latestData.uiData.TemporaryHoldUntilTime
+	def vacationHoldMode = decodedResult.latestData.uiData.IsInVacationHoldMode
+	def vacationHold = decodedResult.latestData.uiData.VacationHold
+	Boolean isEmergencyHeatAllowed = decodedResult.latestData.uiData.SwitchEmergencyHeatAllowed
+
+	String[] dniParts = cd.deviceNetworkId.split("_") // which child 'owns this'?
+	state.heatLowerSetptLimit = decodedResult.latestData.uiData.HeatLowerSetptLimit 
+	state.heatUpperSetptLimit = decodedResult.latestData.uiData.HeatUpperSetptLimit 
+	state.coolLowerSetptLimit = decodedResult.latestData.uiData.CoolLowerSetptLimit 
+	state.coolUpperSetptLimit = decodedResult.latestData.uiData.CoolUpperSetptLimit 
+	
+	if (holdTime != 0) { getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"TemporaryHold", descriptionText:"${cd.displayName} was Set to Temporary Hold"]]) }
+	if (vacationHoldMode == true) { getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"VacationHold", descriptionText:"${cd.displayName} was Set to Vacation Hold"]]) }
+	if (vacationHoldMode == false && holdTime == 0 && isScheduleCapable == true ) { getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"FollowingSchedule", descriptionText:"${cd.displayName} was Set to Following Schedule"]]) }
+
+
+	Integer fanMode = decodedResult.latestData.fanData.fanMode
+	Boolean fanIsRunning = decodedResult.latestData.fanData.fanIsRunning
+
+	// set fan and operating state
+	String fanState = "idle"
+	if (fanIsRunning) { fanState = "on" } 
+
+	String operatingState = [ 0: 'idle', 1: 'heating', 2: 'cooling' ][equipmentStatus] ?: 'idle'
+
+	if ((state.childParamMap."${dniParts[1]}".haveHumidifier != 'Yes') && (fanIsRunning == true) && (equipmentStatus == 0)) { 
+	    operatingState = "fan only"
+	} 
+	else if ((state.childParamMap."${dniParts[1]}".haveHumidifier == 'Yes')  && (fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
+	    operatingState = "Humidifying"
+	}
+
+	logInfo("Get Operating State: $operatingState - Fan to $fanState")
+
+	n = [ 0: 'auto', 2: 'circulate', 1: 'on', 3: 'followSchedule' ][fanMode]
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatFanMode", value:n, descriptionText:"${cd.displayName} Fan was Set to $n"]])
+
+	n = [ 1: 'heat', 2: 'off', 3: 'cool', 5: 'auto', 4: 'emergency heat' ][switchPos] ?: 'auto'
+	getChildDevice(cd.deviceNetworkId).parse([[name:"temperature", value:curTemp, descriptionText:"${cd.displayName} Temperature was Set to $curTemp", unit: "°${location.temperatureScale}"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value:n, descriptionText:"${cd.displayName} Mode was Set to $n"]])
+	cd.setLastRunningMode(n) // lastRunningMode in the Child
+
+	//Send events 
+	if (hasIndoorHumid == false) { curHumidity = 0 }
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value:operatingState, descriptionText:"${cd.displayName} Op State was Set to $operatingState"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"fanOperatingState", value:fanState, descriptionText:"${cd.displayName} Fan was Set to $fanState"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:coolSetPoint, descriptionText:"${cd.displayName} Cooling was Set to $coolSetPoint", unit:"°${location.temperatureScale}"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value:heatSetPoint, descriptionText:"${cd.displayName} Heating was Set to $heatSetPoint", unit:"°${location.temperatureScale}"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidity", value:curHumidity as Integer, descriptionText:"${cd.displayName} Humidity was Set to $curHumidity", unit:"%"]])
+
+	if (state.childParamMap."${dniParts[1]}".haveHumidifier == 'Yes') {
+		// kludge to figure out if humidifier is on, fan has to be auto, and if fan is on but not heat/cool and we have enabled the humidifyer it should be humidifying"
+		//if (debugOutput) log.debug "fanIsRunning = $fanIsRunning, equip status = $equipmentStatus, fanMode = $fanMode, temp = $curTemp, humidity = $curHumidity"
+	     
+	 	if ((fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Humidifying", descriptionText:"${cd.displayName} Humidifier was Set to Humidifying"]])
+		} 
+		else {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Idle", descriptionText:"${cd.displayName} Humidifier was Set to Idle"]])
+		}
+	}
+
+	def now = new Date().format('MM/dd/yyyy h:mm a', location.timeZone)
+	getChildDevice(cd.deviceNetworkId).parse([[name:"lastUpdate", value:now, descriptionText:"${cd.displayName} Last Update was Set to $now"]])
+	
+	if (state.childParamMap."${dniParts[1]}".enableOutdoorTemps == "Yes") {
+		if (hasOutdoorHumid) {
+			setOutdoorHumidity(cd, curOutdoorHumidity)
+			def cdx = getChildDevice("${cd.id}-Humidity")
+			getChildDevice(cdx.deviceNetworkId).parse([[name:"outdoorHumidity", value:curOutdoorHumidity as Integer, descriptionText:"${cdx.displayName} Outdoor Humidity was Set to $curOutdoorHumidity", unit:"%"]])
+		}
+	
+		if (hasOutdoorTemp) {
+			setOutdoorTemperature(cd, curOutdoorTemp)
+			def cdx = getChildDevice("${cd.id}-Temperature")
+			getChildDevice(cdx.deviceNetworkId).parse([[name:"outdoorTemperature", value:curOutdoorTemp as Integer, descriptionText:"${cdx.displayName} Outdoor Temperature was Set to $curOutdoorTemp", unit:"°${location.temperatureScale}"]])
+		}
+	}
+	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])		
 }
 
 
@@ -541,104 +486,59 @@ def getHumidifierStatus(cd, Boolean fromUnauth = false) {
     ]
 
     if (debugOutput) log.debug "sending gethumidStatus request: $params"
-/*	def pData = [data:['cd':[cd.deviceNetworkId]]]
-	if (debugOutput) log.debug "params = $params"
-
+	def pData = [cd:[cd]]
 	asynchttpGet("getHumidStatusHandler", params, pData)
 }
 
+
 def getHumidStatusHandler(resp, data) {
 	if(resp.getStatus() == 200 || resp.getStatus() == 207) {
-        if (debugOutput) log.debug "GetHumidity Request was successful, $resp.status"
-	  def cdd = data["cd"]
-	  def cd = getChildDevice(cdd.deviceNetworkId)
-*/
-	def CancelLine = [:]
-	def Number HumLevel
-	def Number HumMin
-	def Number HumMax
-	try {
-		httpGet(params) { response ->
-			if (debugOutput) log.debug "GetHumidity Request was successful, $response.status"
-			if (debugOutput) log.debug "response = $response.data"
+		if (debugOutput) log.debug "GetHumidity Request was successful, $resp.status"
+		def cdd = data["cd"]
+		def response = resp.getData().toString()
+		getHumidifierDistrib (cdd, response)
+	}
+}
 
-			//  if (debugOutput) log.debug "ld = $response.data.latestData"
-			//  if (debugOutput) log.debug "humdata = $response.data.latestData.humData"
-
-			logInfo("lowerLimit: ${response.data.latestData.humData?.lowerLimit}")        
-			logInfo("upperLimit: ${response.data.humData?.upperLimit}")        
-			logInfo("SetPoint: ${response.data.humData?.Setpoint}")        
-			logInfo("DeviceId: ${response.data.humData?.DeviceId}")        
-			logInfo("IndoorHumidity: ${response.data.humData?.IndoorHumidity}")        
-
-			def data = response.getData().toString()
-
-			data.split("\n").each {
-				//if (debugOutput) log.debug "working on \"${it}\""
-				if (it.contains("CancelMin")) {
-			    		CancelLine = it.trim()
-			    		def pair = CancelLine.split(" ");
-			    		if (debugOutput)   log.debug "got cancel min line: $CancelLine"
+def getHumidifierDistrib (cd, resp) {
+	Map CancelLine = [:]
+	Integer HumLevel = 0
+	Integer HumMin   = 1
+	Integer HumMax   =99
+	resp.split("\n").each {
+		if (it.contains("CancelMin")) {
+	    		CancelLine = it.trim()
+	    		def pair = CancelLine.split(" ");
+	    		if (debugOutput)   log.debug "got cancel min line: $CancelLine"
+		
+	    		def p0 = pair[0]
+	    		def p1 = pair[1]
+	    		def p2 = pair[2]
+		
+	    		def pair2 = p1.split("%")
+	    		def p20 = pair2[0]
+	    		def p21 = pair2[1]
+	    		def p22 = pair2[2]
 				
-			    		def p0 = pair[0]
-			    		def p1 = pair[1]
-			    		def p2 = pair[2]
-				
-			    		def pair2 = p1.split("%")
-			    		def p20 = pair2[0]
-			    		def p21 = pair2[1]
-			    		def p22 = pair2[2]
-				
-			    		//log.debug "p20 = $p20"
-			    		// log.debug "p21 = $p21"
-			    		//log.debug "p22 = $p22"
-				
-			    		HumLevel = p21.toInteger()
-			    		HumMin = p20.toInteger()
-				
-			    		def pair3 = p2.split("%")
-			    		//log.debug "pair3 = $pair3"
-			    		def p30 = pair3[0]
-			    		// log.debug "p30 = $p30"
-				
-			    		HumMax = p30.toInteger() 
-				
-			    		if (debugOutput) {
-			    			log.debug "-----------------------"
-			    			log.debug "Got current humidifier level = $HumLevel"
-			    			log.debug "Got Current humidifier Min = $HumMin"
-			    			log.debug "Got Current humidifier Max= $HumMax"
-			    		}
-				}
-			}
-        
-     	//Send events 
-	//		(name: 'humidifierStatus', value: HumStatus)
-		getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierSetPoint", value:HumLevel as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumLevel", unit:"%"]])
-		getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierUpperLimit", value:HumMax as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
-		getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierLowerLimit", value:HumMin as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
-		}
-	} 
-	catch (e) {
-		log.error "Something went wrong: $e"
-		def String eStr = e.toString()
-		def pair = eStr.split(" ")
-		def p1 = pair[0]
-		def p2 = pair[1]
-
-		if ((p2 == "Unauthorized") || (p2 == "Read")) {
-			if (fromUnauth) {
-				if (debugOutput) log.debug "2nd Unauthorized failure ... giving up!"
-				getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-			} else {
-				if (debugOutput) log.debug "Scheduling a retry in 5 minutes due to Unauthorized!"
-				def pData = [data:['cd':[cd.deviceNetworkId]]]
-				runIn(300, refreshFromRunin, pData)
-			}
+	    		HumLevel = p21.toInteger()
+	    		HumMin = p20.toInteger()
+		
+	    		def pair3 = p2.split("%")
+	    		//log.debug "pair3 = $pair3"
+	    		def p30 = pair3[0]
+	    		// log.debug "p30 = $p30"
+		
+	    		HumMax = p30.toInteger() 
+		
 		}
 	}
+        
+     	//Send events 
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierSetPoint", value:HumLevel as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumLevel", unit:"%"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierUpperLimit", value:HumMax as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierLowerLimit", value:HumMin as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
+	
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
-
 }
 
 
@@ -664,6 +564,7 @@ void settingsAccumWait(data) {
 	def cdd = data["cd"]
 	def cd = getChildDevice(cdd)
 	device.data.SetStatus = 0
+	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 
 	login()
 	if (debugOutput) log.debug "Honeywell TCC 'setStatus'"
@@ -718,40 +619,13 @@ void settingsAccumWait(data) {
 		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 	}
 
-/*
-// end httpPost secton / beginning asynchttpPost post section
-	def pData = [cd:[cd]]
-	if (debugOutput) log.debug "params = $params"
-	asynchttpPost("setStatusHandler", params, pData) 
-}    
-
-
-def setStatusHandler(resp, data) {
-	//log.debug "data was passed successfully $data"
-	//log.debug "status of post call is: ${resp.status}"
-
-	def cdd = data["cd"]
-	def cd = getChildDevice(cdd.deviceNetworkId)
-	if(resp.getStatus() == 408) {if (debugOutput) log.debug "TCC Request timed out, $resp.status, $cd"}
-	if(resp.getStatus() == 200 || resp.getStatus() == 207) {
-		def setStatusResult = resp.data
-		if (debugOutput) log.debug "Request was successful, $resp.status"
-		device.data.SetStatus = 1
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
-	} else { 
-		if (descTextEnable) log.info "TCC setStatus failed" 
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-	}
-*/
-//end asynchttpPost post section
-
-// prepare for the next cycle by clearing all the values just set.
+	// prepare for the next cycle by clearing all the values just sent.
 	deviceSettingInitDB(cd, null)
 }
 
 
-Boolean refractory = false
-void loginRefractory() { refactory = false }
+Boolean refractory
+void loginRefractory() { refractory = false }
 
 /* ------------------------------------------------------------------
 
@@ -768,10 +642,10 @@ void loginRefractory() { refactory = false }
    ------------------------------------------------------------------ */
 
 def login(Boolean fromUnauth = false) {
-	if (debugOutput) log.debug "Honeywell TCC 'login'"
-	if (refactory) return 	// we've done a login in the past 600ms
+	if (refractory) return 	// we've done a login in the past 600ms
 	refractory = true
 	runInMillis( 600, loginRefractory)
+	if (debugOutput) log.debug "Honeywell TCC 'login'"
 	
 	Map params = [
 		uri: "https://${tccSite()}/portal/",
@@ -823,7 +697,7 @@ def login(Boolean fromUnauth = false) {
 	                if (debugOutput) log.debug "!error when checking expiration date: $e ($expiration) [$expireParts.length] {$it.value}"
 	            }
 	
-	            allCookies = allCookies + it.value + ';'
+	            allCookies += it.value + ';'
 	
 	            if (cookie != ".ASPXAUTH_TH_A=") {
 	                if (it.value.split('=')[1].trim() != "") {
@@ -897,6 +771,10 @@ def deviceSettingInitDB(cd, val) { 	 // reset all params, then set individually
 }
 // end of section
 
+
+float ensureRange(float value, float min, float max) {
+   return Math.min(Math.max(value, min), max);
+}
 
 def refreshFromRunin(data)
 { 
