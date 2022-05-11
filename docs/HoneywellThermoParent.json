@@ -20,7 +20,7 @@
         {
                 "id": "a9695dd9-984c-49bc-a916-2c2f21013d29",
                 "name": "Honeywell WiFi Thermostat Component",
-                "version": "2.0.4",
+                "version": "2.0.3",
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy",
                 "required": true,
