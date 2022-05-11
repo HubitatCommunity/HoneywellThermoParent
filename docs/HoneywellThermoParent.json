@@ -11,19 +11,21 @@
                 "name": "Honeywell Thermo Parent",
                 "version": "2.0.3",
                 "namespace": "csteele",
-                "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/master/HoneywellThermoParent.groovy",
+                "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy",
                 "required": true,
                 "oauth": false,
-                "description": "A Parent/child version of the original"
+                "description": "A Parent/child version of the original",
+                "releaseNotes": "Initial Release to the Community"
         },
         {
                 "id": "a9695dd9-984c-49bc-a916-2c2f21013d29",
                 "name": "Honeywell WiFi Thermostat Component",
                 "version": "2.0.3",
                 "namespace": "csteele",
-                "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/master/HoneywellWiFiThermostatComponent.groovy",
+                "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy",
                 "required": true,
                 "oauth": false,
-                "description": "A Parent/child version of the original"
+                "description": "A Parent/child version of the original",
+                "releaseNotes": "Initial Release to the Community"
         }]
 }
