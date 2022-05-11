@@ -32,7 +32,7 @@
 
 
 metadata {
-    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true) {
+    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true, importUrl: "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy") {
         capability "Thermostat"
         capability "Refresh"
         capability "Actuator"
