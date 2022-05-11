@@ -41,7 +41,7 @@ import groovy.transform.Field
 @Field static Map<String, Map> fanMap = [auto:0, on:1, circulate:2, followSchedule:3] 
 
 metadata {
-	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "C Steele, Eric Thomas, lg kahn") {
+	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "C Steele, Eric Thomas, lg kahn", importUrl: "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy") {
 		command "addThermostat"
 
 /* -= Attribute List =-
