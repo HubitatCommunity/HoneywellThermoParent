@@ -15,6 +15,7 @@
  *
  *
  *
+ * csteele: v2.0.5   login returns true/false allowing refresh to retry login
  * csteele: v2.0.4   refactored "getStatus" and "getHumidityStatus" to minimize try/catch scope
  *			     reorganized methods to clump Fan methods together, to clump Mode methods together, etc.
  *			     "getHumidityStatus" using asynchttpGet
@@ -33,7 +34,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.4"  }
+ public static String version()	{  return "v2.0.5"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -123,14 +124,20 @@ void logsOff(){
 //
 void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', units: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
-	login(fromUnauth)
+	if ( !login(cd, fromUnauth) ) {
+		pauseExecution(6000)
+		if ( !login(cd, fromUnauth) ) {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+			return
+		}
+	}
 	getHumidifierStatus(cd, fromUnauth)
 	getStatus(cd)
 }
 
 // a version of refresh for those Outdoor sensors to use.
 void componentRefresh(cd) { 
-	log.info "Component Refresh button pushed."
+	log.info "${cd.displayName} Component Refresh button pushed."
 }
 
 // Thermostat mode section
@@ -566,7 +573,13 @@ void settingsAccumWait(data) {
 	device.data.SetStatus = 0
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 
-	login()
+	if ( !login(cd, fromUnauth) ) {
+		pauseExecution(6000)
+		if ( !login(cd, fromUnauth) ) {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+			return
+		}
+	}
 	if (debugOutput) log.debug "Honeywell TCC 'setStatus'"
 	def today = new Date()
 	String[] dniParts = cd.deviceNetworkId.split("_")
@@ -624,8 +637,6 @@ void settingsAccumWait(data) {
 }
 
 
-Boolean refractory
-void loginRefractory() { refractory = false }
 
 /* ------------------------------------------------------------------
 
@@ -641,11 +652,9 @@ void loginRefractory() { refractory = false }
 
    ------------------------------------------------------------------ */
 
-def login(Boolean fromUnauth = false) {
-	if (refractory) return 	// we've done a login in the past 600ms
-	refractory = true
-	runInMillis( 600, loginRefractory)
+def login(cd, Boolean fromUnauth = false) {
 	if (debugOutput) log.debug "Honeywell TCC 'login'"
+	Boolean ofExit = true 	// default: assume that login works and return a True.
 	
 	Map params = [
 		uri: "https://${tccSite()}/portal/",
@@ -708,7 +717,11 @@ def login(Boolean fromUnauth = false) {
 	                }
 	            }
 	        }
-	        //log.debug "cookies: $device.data.cookiess"
+            int cookieCount = device.data.cookiess.split(";", -1).length - 1;
+            if (cookieCount < 9) {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+			ofExit = false
+            }
 	    }
 	} catch (e) {
 		log.warn "Something went wrong during login: $e"
@@ -717,21 +730,21 @@ def login(Boolean fromUnauth = false) {
 		def p1 = pair[0]
 		def p2 = pair[1]
 
-		if ((p2 == "Unauthorized") || (p2 == "Read"))
-		{
-			if (fromUnauth)
-			{
+		if ((p2 == "Unauthorized") || (p2 == "Read")) {
+			if (fromUnauth) {
 				if (debugOutput) log.debug "2nd Unauthorized failure ... giving up!"
 				getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 			}
-			else
-			{
+			else {
 				if (debugOutput) log.debug "Scheduling a retry in 5 minutes due to Unauthorized!"
 				def pData = [data:['cd':[cd.deviceNetworkId]]]
 				runIn(300, refreshFromRunin, pData)
 			}
 		}
+		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+		ofExit = false
 	}
+	return ofExit
 }	
 
 // Value setting Section
