@@ -15,6 +15,8 @@
  *
  *
  *
+ * csteele: v2.0.6   added Delete Outdoor Child and Delete Thermostat
+ *			     fixed cron string to run the whole hour (x mod y / y) 
  * csteele: v2.0.5   login returns true/false allowing refresh to retry login
  * csteele: v2.0.4   refactored "getStatus" and "getHumidityStatus" to minimize try/catch scope
  *			     reorganized methods to clump Fan methods together, to clump Mode methods together, etc.
@@ -32,9 +34,26 @@
  *			     added fanOperatingState Attribute.
 **/
 
+/*
+	Driver overview.
+		The choice was made to have the child driver do very little. The UI is centered in the child driver, but it dispatches
+		everything to the parent. There the UI is processed and an Event is sent back to the child to be displayed on 
+		the child's Current States column. Each Child driver has a unique id that it passes to the parent (cd) to keep each 
+		child action separate from other child devices. 
+		The child device specific data is kept in two Maps: state.deviceSetting & state.childParamMap
+
+		This parent driver is organized into the three major categories of actions. 
+			UI methods, all beginning with "component" 
+			setStatus, which is communications TO the Thermostat.
+			getStatus, which is communications FROM the Thermostat. 
+		Every UI button sets a value into deviceSetting[], which is cleared when those values are sent via setStatus. 
+		The childParameterMap holds the unique preferences of each child thermostat.
+	
+*/
+
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.5"  }
+ public static String version()	{  return "v2.0.6"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -64,7 +83,6 @@ metadata {
 	   input name: "descTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
 	}
 }
-
 
 
 void updated(){
@@ -133,6 +151,33 @@ void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	}
 	getHumidifierStatus(cd, fromUnauth)
 	getStatus(cd)
+}
+
+void componentDeleteThermostatChild(id) { 
+	//log.info "delete Thermostat Child button pushed. $id.deviceNetworkId, $id.id"
+    def cdd = getChildDevices()?.findAll { it.deviceNetworkId > id.id}
+    cdd.each { 
+		dniParts = it.deviceNetworkId.split("[-_]")  // split into 3 parts. Everywhere else in this driver, it's 2 parts.
+        if ( dniParts.size() == 2 && dniParts[0] == id.id ) { deleteChildDevice(it.deviceNetworkId) }
+    }
+	cdd = getChildDevice(id.deviceNetworkId)
+	cdd.each { 
+       dniParts = it.deviceNetworkId.split("[-_]")  // split into 3 parts. Everywhere else in this driver, it's 2 parts.
+       deleteChildDevice(it.deviceNetworkId)
+    } // delete only those Outdoor devices and those with the same id as the child specificly clicked
+	String[] dniParts = id.deviceNetworkId.split("_") 
+	state.deviceSetting = state.deviceSetting.findAll { it.key != dniParts[1] }
+	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[1] }
+}
+
+
+void componentDeleteOutdoorChild(id) {
+	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
+	cdd.each { 
+		String[] dniParts = it.deviceNetworkId.split("[-_]")  // split into 3 parts. Everywhere else in this driver, it's 2 parts.
+		// delete only those Outdoor devices and those with the same id as the child specificly clicked
+		if ( dniParts.size() == 2 && dniParts[0] == id ) { log.debug "deleteChildDevice($it.deviceNetworkId)" }
+	}
 }
 
 // a version of refresh for those Outdoor sensors to use.
@@ -437,7 +482,6 @@ def getStatusDistrib(cd, Map decodedResult) {
 
 	if (state.childParamMap."${dniParts[1]}".haveHumidifier == 'Yes') {
 		// kludge to figure out if humidifier is on, fan has to be auto, and if fan is on but not heat/cool and we have enabled the humidifyer it should be humidifying"
-		//if (debugOutput) log.debug "fanIsRunning = $fanIsRunning, equip status = $equipmentStatus, fanMode = $fanMode, temp = $curTemp, humidity = $curHumidity"
 	     
 	 	if ((fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Humidifying", descriptionText:"${cd.displayName} Humidifier was Set to Humidifying"]])
@@ -526,21 +570,19 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p20 = pair2[0]
 	    		def p21 = pair2[1]
 	    		def p22 = pair2[2]
-				
+
 	    		HumLevel = p21.toInteger()
 	    		HumMin = p20.toInteger()
 		
 	    		def pair3 = p2.split("%")
-	    		//log.debug "pair3 = $pair3"
 	    		def p30 = pair3[0]
-	    		// log.debug "p30 = $p30"
 		
 	    		HumMax = p30.toInteger() 
 		
 		}
 	}
         
-     	//Send events 
+     	//Send events via Child
 	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierSetPoint", value:HumLevel as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumLevel", unit:"%"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierUpperLimit", value:HumMax as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierLowerLimit", value:HumMin as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
@@ -616,7 +658,6 @@ void settingsAccumWait(data) {
 	  timeout: 10
 	]
 
-// beginning httpPost secton 
 	if (debugOutput) log.debug "params = $params"
 	try {
 		httpPost(params) {
@@ -786,7 +827,7 @@ def deviceSettingInitDB(cd, val) { 	 // reset all params, then set individually
 
 
 float ensureRange(float value, float min, float max) {
-   return Math.min(Math.max(value, min), max);
+   return Math.min(Math.max(value, min), max)
 }
 
 def refreshFromRunin(data)
