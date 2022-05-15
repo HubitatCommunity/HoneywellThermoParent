@@ -14,6 +14,7 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  * 
+ * csteele: v2.0.4   added Delete Outdoor Children and Delete Thermostat
  * csteele: v2.0.3   corrected PermHold to be a code value
  * csteele: v2.0.2   corrected logic errors in Poll
  *			   renamed 
@@ -28,7 +29,7 @@
  *                    added fanOperatingState Attribute.
 **/
 
- public static String version()     {  return "v2.0.3"  }
+ public static String version()     {  return "v2.0.4"  }
 
 
 metadata {
@@ -60,6 +61,8 @@ metadata {
         command    "coolLevelDown"
         command    "setFollowSchedule"
         command	 "setLastRunningMode"	// does nothing in this UI
+        command    "caution_deleteOutdoorDevices"
+        command    "caution_deleteThisThermostat"
 
 /* -= Attribute List =-
  	[thermostatFanMode, humidifierLowerLimit, supportedThermostatFanModes, supportedThermostatModes, followSchedule, humidifierSetPoint, thermostatSetpoint, 
@@ -108,7 +111,7 @@ void poll() {
 	    Integer pIminute = pollIntervals.toInteger() / 60 // find minutes
 	    Integer pIhour = pIminute / 60 // find hours
 
-	    String pIntMinute = (pIminute == 60 || pIminute == 0) ? "${boutNow.minutes}" : "${boutNow.minutes}/$pIminute"
+	    String pIntMinute = (pIminute == 60 || pIminute == 0) ? "${boutNow.minutes}" : "${boutNow.minutes % pIminute}/$pIminute"
 	    String pIntHour = (pIhour < 1) ? "*" : "*/$pIhour"
 
       	schedule("0 $pIntMinute $pIntHour ? * *", refresh) 
@@ -132,6 +135,23 @@ void parse(List description) {
     }
 }
 
+///*
+void caution_createOutdoorDevices() {
+    parent?.createOutdoorDevices(this.device)
+}
+
+///*/
+void caution_deleteThisThermostat() {
+    parent?.componentDeleteThermostatChild(this.device)
+}
+
+void caution_deleteOutdoorDevices() {
+    parent?.componentDeleteOutdoorChild(this.device.id)
+}
+
+void deleteOutdoorDevices() {
+    parent?.componentDeleteOutdoorChild(this.device.id)
+}
 
 void setFollowSchedule() {
     parent?.componentSetFollowSchedule(this.device)
