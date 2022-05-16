@@ -15,6 +15,7 @@
  *
  * 
  * csteele: v2.0.4   added Delete Outdoor Children and Delete Thermostat
+ *			   remediated cron scheduling (x % y / y)
  * csteele: v2.0.3   corrected PermHold to be a code value
  * csteele: v2.0.2   corrected logic errors in Poll
  *			   renamed 
@@ -33,7 +34,7 @@
 
 
 metadata {
-    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true, importUrl: "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy") {
+    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true) {
         capability "Thermostat"
         capability "Refresh"
         capability "Actuator"
@@ -88,9 +89,8 @@ metadata {
 }
 
 void updated() {
-	log.info "Updated ${this.device}"
+	log.info "Updated ${this.device} ($device.deviceNetworkId)"
 	log.warn "description logging is: ${txtEnable == true}"
-	log.debug "device: $device.deviceNetworkId"
 	runInMillis( 200, parentUpdate)
 	runInMillis( 400, poll)
 }
@@ -103,7 +103,7 @@ void parentUpdate() {
 
 
 void poll() {
-	if (txtEnable) log.debug "received Poll request from ${this.displayName ?: (this.device.label ?: this.device.name)} Poll Interval: $pollIntervals"
+	if (txtEnable) log.info "received Poll request from ${this.displayName ?: (this.device.label ?: this.device.name)} (Poll Interval: ${pollIntervals.toInteger()/60} mins)"
 	unschedule(refresh) // maybe poll interval is now zero
 	// build out a cron string for pollInterval options 1 min -- 60 min
 	if (pollIntervals > "0") { 
@@ -135,21 +135,11 @@ void parse(List description) {
     }
 }
 
-///*
-void caution_createOutdoorDevices() {
-    parent?.createOutdoorDevices(this.device)
-}
-
-///*/
 void caution_deleteThisThermostat() {
     parent?.componentDeleteThermostatChild(this.device)
 }
 
 void caution_deleteOutdoorDevices() {
-    parent?.componentDeleteOutdoorChild(this.device.id)
-}
-
-void deleteOutdoorDevices() {
     parent?.componentDeleteOutdoorChild(this.device.id)
 }
 
