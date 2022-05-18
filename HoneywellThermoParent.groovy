@@ -16,6 +16,7 @@
  *
  *
  *
+ * csteele: v2.0.8   corrected "refresh()" in "refreshFromRunin" to be "componentDoRefresh()"
  * csteele: v2.0.7   corrected "nextChild" to correctly increment as a number, not asci increment
  *			     used the same split("[-_]") string to prevent future typos
  * csteele: v2.0.6   added Delete Outdoor Child and Delete Thermostat
@@ -849,7 +850,7 @@ def refreshFromRunin(data)
 	def cdd = data["cd"]
 	def cd = getChildDevice(cdd)
 	if (debugOutput) log.debug "Calling refresh after Unauthorize failure!"
-	refresh(cd, true)
+	componentDoRefresh(cd, true)
 }
 
 
