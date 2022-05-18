@@ -57,7 +57,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.7"  }
+ public static String version()	{  return "v2.0.8"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
