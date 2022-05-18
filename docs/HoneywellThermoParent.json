@@ -9,7 +9,7 @@
         "drivers": [{
                 "id": "f991de80-143f-49c8-a127-7996e972ed58",
                 "name": "Honeywell Thermo Parent",
-                "version": "2.0.7",
+                "version": "2.0.8",
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy",
                 "required": true,
