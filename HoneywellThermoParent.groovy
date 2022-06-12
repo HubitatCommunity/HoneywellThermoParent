@@ -16,6 +16,7 @@
  *
  *
  *
+ * csteele: v2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.
  * csteele: v2.0.8   corrected "refresh()" in "refreshFromRunin" to be "componentDoRefresh()"
  * csteele: v2.0.7   corrected "nextChild" to correctly increment as a number, not asci increment
  *			     used the same split("[-_]") string to prevent future typos
@@ -57,7 +58,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.8"  }
+ public static String version()	{  return "v2.0.9"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -156,6 +157,7 @@ void componentDoRefresh(cd, Boolean fromUnauth = false) {
 			return
 		}
 	}
+	if (debugOutput) log.debug "Recycle Login?" ///
 	getHumidifierStatus(cd, fromUnauth)
 	getStatus(cd)
 }
@@ -194,27 +196,27 @@ void componentRefresh(cd) {
 
 // Thermostat mode section
 void componentOff(cd) {
-	if (debugOutput) log.info "received off request from ${cd.displayName}"
+	if (descTextEnable) log.info "received off request from ${cd.displayName}"
 	setThermostatMode(cd, 'off')
 }
 
 void componentAuto(cd) {
-	if (debugOutput) log.info "received Auto request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Auto request from ${cd.displayName}"
 	setThermostatMode(cd, 'auto')
 }
 
 void componentCool(cd) {
-	if (debugOutput) log.info "received Cool request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Cool request from ${cd.displayName}"
 	setThermostatMode(cd, 'cool')
 }
 
 void componentHeat(cd) {
-	if (debugOutput) log.info "received Heat request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Heat request from ${cd.displayName}"
 	setThermostatMode(cd, 'heat')
 }
 
 void componentEmergencyHeat(cd) {
-	if (debugOutput) log.info "received Emergency Heat request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Emergency Heat request from ${cd.displayName}"
 	if (isEmergencyHeatAllowed) {
 		if (debugOutput) log.debug "Set Emergency/Auxiliary Heat On"
 		setThermostatMode(cd, 'emergency heat')
@@ -236,7 +238,7 @@ void setThermostatMode(cd, mode) {
 }
 
 void componentSetThermostatMode(cd, mode) {
-	if (debugOutput) log.info "received Thermostat Mode request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Thermostat Mode request from ${cd.displayName}"
 	setThermostatMode(cd, mode)
 }
 // end of section
@@ -244,7 +246,7 @@ void componentSetThermostatMode(cd, mode) {
 
 // Heat/Cool Set/Up/Down section
 void componentSetCoolingSetpoint(cd, float val) {
-	if (debugOutput) log.info "received Cooling Setpoint request from ${cd.displayName}: $val"
+	if (descTextEnable) log.info "received Cooling Setpoint request from ${cd.displayName}: $val"
 	float valIn = val // for limits check
 	val = ensureRange( val.toFloat(), state.coolLowerSetptLimit.toFloat(), state.coolUpperSetptLimit.toFloat() )
 	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
@@ -256,7 +258,7 @@ void componentSetCoolingSetpoint(cd, float val) {
 }
 
 void componentSetHeatingSetpoint(cd, float val) {
-	if (debugOutput) log.info "received Heating Setpoint request from ${cd.displayName}: $val"
+	if (descTextEnable) log.info "received Heating Setpoint request from ${cd.displayName}: $val"
 	float valIn = val // for limits check
 	val = ensureRange( val.toFloat(), state.heatLowerSetptLimit.toFloat(), state.heatUpperSetptLimit.toFloat() )
 	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
@@ -291,22 +293,22 @@ void componentCoolLevelUp(cd) {
 
 // Fan mode section
 void componentSetThermostatFanMode(cd, mode) {
-	if (debugOutput) log.info "received Fan Mode request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Fan Mode request from ${cd.displayName}"
 	setThermostatFanMode(cd, mode)
 }
 
 void componentFanAuto(cd) {
-	if (debugOutput) log.info "received Fan Auto request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Fan Auto request from ${cd.displayName}"
 	setThermostatFanMode(cd, 'auto')
 }
 
 void componentFanCirculate(cd) {
-	if (debugOutput) log.info "received Fan Circulate request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Fan Circulate request from ${cd.displayName}"
 	setThermostatFanMode(cd, 'circulate')
 }
 
 void componentFanOn(cd) {
-	if (debugOutput) log.info "received Fan On request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Fan On request from ${cd.displayName}"
 	setThermostatFanMode(cd, 'on')
 }
 
@@ -326,7 +328,7 @@ def setThermostatFanMode(cd, mode) {
 
 
 void componentSetFollowSchedule(cd) {
-	if (debugOutput) log.info "received Set Follow Schedule request from ${cd.displayName}"
+	if (descTextEnable) log.info "received Set Follow Schedule request from ${cd.displayName}"
 	deviceSettingInitDB(cd, 0) 	 // reset all params, then set individually
 	setStatus(cd)
 	
@@ -447,7 +449,6 @@ def getStatusDistrib(cd, Map decodedResult) {
 	def vacationHoldMode = decodedResult.latestData.uiData.IsInVacationHoldMode
 	def vacationHold = decodedResult.latestData.uiData.VacationHold
 	Boolean isEmergencyHeatAllowed = decodedResult.latestData.uiData.SwitchEmergencyHeatAllowed
-
 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]") // which child 'owns this'?
 	state.heatLowerSetptLimit = decodedResult.latestData.uiData.HeatLowerSetptLimit 
@@ -585,7 +586,6 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p21 = pair2[1]
 	    		def p22 = pair2[2]
 		
-		
 	    		HumLevel = p21.toInteger()
 	    		HumMin = p20.toInteger()
 		
@@ -593,6 +593,7 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p30 = pair3[0]
 		
 	    		HumMax = p30.toInteger() 
+		
 		}
 	}
         
@@ -691,7 +692,6 @@ void settingsAccumWait(data) {
 	// prepare for the next cycle by clearing all the values just sent.
 	deviceSettingInitDB(cd, null)
 }
-
 
 
 /* ------------------------------------------------------------------
