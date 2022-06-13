@@ -4,6 +4,7 @@
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
         "dateReleased": "2022-05-03",
+        "releaseNotes": "PARENT\nv2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.\nv2.0.8   corrected refresh in refreshFromRunin to be componentDoRefresh\nv2.0.7   corrected nextChild to correctly increment as a number, not asci increment\nv2.0.6   added Delete Outdoor Child and Delete Thermostat\n\nCHILD\nv2.0.4   added Delete Outdoor Children and Delete Thermostat\n   remediated cron scheduling \nv2.0.3   corrected PermHold to be a code value\nv2.0.2   corrected logic errors in Poll",
         "category": "Control",
         "tags": "Tools & Utilities",
         "drivers": [{
@@ -13,8 +14,7 @@
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy",
                 "required": true,
-                "oauth": false,
-                "releaseNotes": "v2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.\nv2.0.8   corrected refresh in refreshFromRunin to be componentDoRefresh\nv2.0.7   corrected nextChild to correctly increment as a number, not asci increment\nv2.0.6   added Delete Outdoor Child and Delete Thermostat"
+                "oauth": false
         },
         {
                 "id": "a9695dd9-984c-49bc-a916-2c2f21013d29",
@@ -23,7 +23,6 @@
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy",
                 "required": true,
-                "oauth": false,
-                "releaseNotes": "v2.0.4   added Delete Outdoor Children and Delete Thermostat\n   remediated cron scheduling \nv2.0.3   corrected PermHold to be a code value\nv2.0.2   corrected logic errors in Poll"
+                "oauth": false
         }]
 }
