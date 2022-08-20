@@ -17,6 +17,8 @@
  *
  *
  * csteele: v2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.
+ * 			     round curTemp to 2 places.
+ * 			     preset supportedThermostatFanModes & supportedThermostatModes used by Thermostat Controller app.
  * csteele: v2.0.8   corrected "refresh()" in "refreshFromRunin" to be "componentDoRefresh()"
  * csteele: v2.0.7   corrected "nextChild" to correctly increment as a number, not asci increment
  *			     used the same split("[-_]") string to prevent future typos
@@ -150,14 +152,12 @@ void logsOff(){
 void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', units: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
 	if ( !login(cd, fromUnauth) ) {
-		if (debugOutput) log.debug "Recycling Login" ///
 		pauseExecution(6000)
 		if ( !login(cd, fromUnauth) ) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 			return
 		}
 	}
-	if (debugOutput) log.debug "Recycle Login?" ///
 	getHumidifierStatus(cd, fromUnauth)
 	getStatus(cd)
 }
@@ -430,7 +430,7 @@ def getStatusHandler (resp, data) {
 
 def getStatusDistrib(cd, Map decodedResult) {
 
-	def curTemp = decodedResult.latestData.uiData.DispTemperature
+	Float curTemp = decodedResult.latestData.uiData.DispTemperature
 	def switchPos = decodedResult.latestData.uiData.SystemSwitchPosition
 	def coolSetPoint = decodedResult.latestData.uiData.CoolSetpoint
 	def heatSetPoint = decodedResult.latestData.uiData.HeatSetpoint
@@ -483,12 +483,14 @@ def getStatusDistrib(cd, Map decodedResult) {
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatFanMode", value:n, descriptionText:"${cd.displayName} Fan was Set to $n"]])
 
 	n = [ 1: 'heat', 2: 'off', 3: 'cool', 5: 'auto', 4: 'emergency heat' ][switchPos] ?: 'auto'
-	getChildDevice(cd.deviceNetworkId).parse([[name:"temperature", value:curTemp, descriptionText:"${cd.displayName} Temperature was Set to $curTemp", unit: "°${location.temperatureScale}"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"temperature", value:curTemp.round(2), descriptionText:"${cd.displayName} Temperature was Set to $curTemp", unit: "°${location.temperatureScale}"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value:n, descriptionText:"${cd.displayName} Mode was Set to $n"]])
 	cd.setLastRunningMode(n) // lastRunningMode in the Child
 
 	//Send events 
 	if (hasIndoorHumid == false) { curHumidity = 0 }
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ['auto', 'circulate', 'on'], descriptionText:"${cd.displayName} preset Supported Fan Modes"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ['auto', 'cool', 'emergency heat', 'heat', 'off'], descriptionText:"${cd.displayName} preset Supported Thermo Modes"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value:operatingState, descriptionText:"${cd.displayName} Op State was Set to $operatingState"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"fanOperatingState", value:fanState, descriptionText:"${cd.displayName} Fan was Set to $fanState"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:coolSetPoint, descriptionText:"${cd.displayName} Cooling was Set to $coolSetPoint", unit:"°${location.temperatureScale}"]])
@@ -631,7 +633,6 @@ void settingsAccumWait(data) {
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 
 	if ( !login(cd, fromUnauth) ) {
-		if (debugOutput) log.debug "Recycling Login" ///
 		pauseExecution(6000)
 		if ( !login(cd, fromUnauth) ) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
