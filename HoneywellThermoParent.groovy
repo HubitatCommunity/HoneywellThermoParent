@@ -16,6 +16,7 @@
  *
  *
  *
+ * csteele: v2.0.10  removed number typing on setCoolingSetpoint and setHeatingSetpoint used by Thermostat Controller app
  * csteele: v2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.
  * 			     round curTemp to 2 places.
  * 			     preset supportedThermostatFanModes & supportedThermostatModes used by Thermostat Controller app.
@@ -59,8 +60,9 @@
 */
 
 import groovy.transform.Field
+///import java.util.concurrent.Semaphore
 
- public static String version()	{  return "v2.0.9"  }
+ public static String version()	{  return "v2.0.10"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -69,6 +71,8 @@ import groovy.transform.Field
 
 metadata {
 	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "C Steele, Eric Thomas, lg kahn") {
+///		capability "Configuration" // <-- delete this before Release also
+///		capability "Initialize"    // <-- delete this before Release also
 		command "addThermostat"
 
 /* -= Attribute List =-
@@ -81,6 +85,15 @@ metadata {
  	poll, refresh, setCoolingSetpoint, setFollowSchedule, setHeatingSetpoint, setThermostatFanMode, setThermostatMode]
 
 */	
+/// delete this section before Release:
+		command 	"WipeState"
+		command	"WipeData"
+		command 	"ClearSchedule"
+		command 	"removeChildDevices"
+		command	"deleteOutdoorChildren", [[name:"childNumber",type:"NUMBER", description:"Child Number", constraints:["NUMBER"]]]
+		command 	"installed"
+		command 	"listThermostats"
+// delete section above before Release
 	}
 
 	preferences {
@@ -92,13 +105,31 @@ metadata {
 }
 
 
+/// delete this section before Release:
+#include csteele.wipes // <-- delete this before Release also
+
+void listThermostats() {
+	def cd = getChildDevices()?.findAll { it.deviceNetworkId > "${device.id}-${type()}"}
+	if (debugOutput) log.debug "listThermostats: $cd"
+}
+
+void createOutdoorDevices(cd) {
+	cdd = addChildDevice("hubitat", "Generic Component Humidity Sensor", "${cd.id}-Humidity", [name: "Outdoor Humidity", isComponent: true])
+	cdd = addChildDevice("hubitat", "Generic Component Temperature Sensor", "${cd.id}-Temperature", [name: "Outdoor Temperature", isComponent: true])
+}
+
+List<String> configure() {
+	log.warn "configure..."
+	runIn(1800,logsOff)
+}
+/// delete section above before Release
 
 
 void updated(){
 	log.info "updated..."
 	log.warn "debug logging is: ${debugOutput == true}"
 	log.warn "description logging is: ${descTextEnable == true}"
-	if (debugOutput) runIn(1800,logsOff)
+///	if (debugOutput) runIn(1800,logsOff)
 }
 
 // parse events into attributes
@@ -152,12 +183,14 @@ void logsOff(){
 void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', units: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
 	if ( !login(cd, fromUnauth) ) {
+		if (debugOutput) log.debug "Recycling Login" ///
 		pauseExecution(6000)
 		if ( !login(cd, fromUnauth) ) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 			return
 		}
 	}
+	if (debugOutput) log.debug "Recycle Login?" ///
 	getHumidifierStatus(cd, fromUnauth)
 	getStatus(cd)
 }
@@ -179,8 +212,15 @@ void componentDeleteThermostatChild(id) {
 	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
 }
 
+///*
+void deleteOutdoorChildren(parameterNumber = null) {
+	log.info "delete Outdoor Child button pushed. $parameterNumber" ///
+	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$parameterNumber-"}
+    cdd.each { deleteChildDevice(it.deviceNetworkId) } 		// delete only those Outdoor devices and those with the same id as the child specificly clicked
+}//*/
 
 void componentDeleteOutdoorChild(id) {
+	///log.info "delete Outdoor Child button pushed. $id" 
 	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
 	cdd.each { 
 		String[] dniParts = it.deviceNetworkId.split("[-_]")
@@ -245,7 +285,7 @@ void componentSetThermostatMode(cd, mode) {
 
 
 // Heat/Cool Set/Up/Down section
-void componentSetCoolingSetpoint(cd, float val) {
+void componentSetCoolingSetpoint(cd, val) {
 	if (descTextEnable) log.info "received Cooling Setpoint request from ${cd.displayName}: $val"
 	float valIn = val // for limits check
 	val = ensureRange( val.toFloat(), state.coolLowerSetptLimit.toFloat(), state.coolUpperSetptLimit.toFloat() )
@@ -257,7 +297,7 @@ void componentSetCoolingSetpoint(cd, float val) {
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:val, descriptionText:"${cd.displayName} Cooling Setpoint is ${val}", unit:"°"]])
 }
 
-void componentSetHeatingSetpoint(cd, float val) {
+void componentSetHeatingSetpoint(cd, val) {
 	if (descTextEnable) log.info "received Heating Setpoint request from ${cd.displayName}: $val"
 	float valIn = val // for limits check
 	val = ensureRange( val.toFloat(), state.heatLowerSetptLimit.toFloat(), state.heatUpperSetptLimit.toFloat() )
@@ -450,6 +490,13 @@ def getStatusDistrib(cd, Map decodedResult) {
 	def vacationHold = decodedResult.latestData.uiData.VacationHold
 	Boolean isEmergencyHeatAllowed = decodedResult.latestData.uiData.SwitchEmergencyHeatAllowed
 
+	///if (debugOutput) {
+	///	log.debug "got holdTime = $holdTime"
+	///	log.debug "got Vacation Hold = $vacationHoldMode"
+	///	log.debug "got scheduleCapable = $isScheduleCapable"
+	///	log.debug "got Emergency Heat = $isEmergencyHeatAllowed"
+	///}
+
 	String[] dniParts = cd.deviceNetworkId.split("[-_]") // which child 'owns this'?
 	state.heatLowerSetptLimit = decodedResult.latestData.uiData.HeatLowerSetptLimit 
 	state.heatUpperSetptLimit = decodedResult.latestData.uiData.HeatUpperSetptLimit 
@@ -489,8 +536,8 @@ def getStatusDistrib(cd, Map decodedResult) {
 
 	//Send events 
 	if (hasIndoorHumid == false) { curHumidity = 0 }
-	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ['auto', 'circulate', 'on'], descriptionText:"${cd.displayName} preset Supported Fan Modes"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ['auto', 'cool', 'emergency heat', 'heat', 'off'], descriptionText:"${cd.displayName} preset Supported Thermo Modes"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ['auto', 'circulate', 'on']]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ['auto', 'cool', 'emergency heat', 'heat', 'off']]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value:operatingState, descriptionText:"${cd.displayName} Op State was Set to $operatingState"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"fanOperatingState", value:fanState, descriptionText:"${cd.displayName} Fan was Set to $fanState"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:coolSetPoint, descriptionText:"${cd.displayName} Cooling was Set to $coolSetPoint", unit:"°${location.temperatureScale}"]])
@@ -499,6 +546,7 @@ def getStatusDistrib(cd, Map decodedResult) {
 
 	if (state.childParamMap."${dniParts[2]}".haveHumidifier == 'Yes') {
 		// kludge to figure out if humidifier is on, fan has to be auto, and if fan is on but not heat/cool and we have enabled the humidifyer it should be humidifying"
+		///if (debugOutput) log.debug "fanIsRunning = $fanIsRunning, equip status = $equipmentStatus, fanMode = $fanMode, temp = $curTemp, humidity = $curHumidity"
 	     
 	 	if ((fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Humidifying", descriptionText:"${cd.displayName} Humidifier was Set to Humidifying"]])
@@ -588,14 +636,26 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p21 = pair2[1]
 	    		def p22 = pair2[2]
 		
+	    		///log.debug "p20 = $p20"
+	    		/// log.debug "p21 = $p21"
+	    		///log.debug "p22 = $p22"
+		
 	    		HumLevel = p21.toInteger()
 	    		HumMin = p20.toInteger()
 		
 	    		def pair3 = p2.split("%")
+	    		///log.debug "pair3 = $pair3"
 	    		def p30 = pair3[0]
+	    		/// log.debug "p30 = $p30"
 		
 	    		HumMax = p30.toInteger() 
 		
+	    		///if (debugOutput) {
+	    		///	log.debug "-----------------------"
+	    		///	log.debug "Got current humidifier level = $HumLevel"
+	    		///	log.debug "Got Current humidifier Min = $HumMin"
+	    		///	log.debug "Got Current humidifier Max= $HumMax"
+	    		///}
 		}
 	}
         
@@ -633,6 +693,7 @@ void settingsAccumWait(data) {
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 
 	if ( !login(cd, fromUnauth) ) {
+		if (debugOutput) log.debug "Recycling Login" ///
 		pauseExecution(6000)
 		if ( !login(cd, fromUnauth) ) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
@@ -675,6 +736,7 @@ void settingsAccumWait(data) {
 	  timeout: 10
 	]
 
+/// beginning httpPost secton 
 	if (debugOutput) log.debug "params = $params"
 	try {
 		httpPost(params) {
@@ -690,10 +752,36 @@ void settingsAccumWait(data) {
 		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 	}
 
+/// end httpPost secton / beginning asynchttpPost post section
+/*
+	def pData = [cd:[cd]]
+	if (debugOutput) log.debug "params = $params"
+	asynchttpPost("setStatusHandler", params, pData) 
+}    
+
+
+def setStatusHandler(resp, data) {
+	def cdd = data.cd
+	def cd = getChildDevice(cdd.deviceNetworkId)
+	if(resp.getStatus() == 200 || resp.getStatus() == 207 || resp.getStatus() == 408) {
+		if (debugOutput) log.debug "Request was successful, $resp.status"
+		device.data.SetStatus = 1
+		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
+	} else { 
+		if (descTextEnable) log.info "TCC setStatus failed" 
+		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+	}
+*/
+///end asynchttpPost post section
+
+
 	// prepare for the next cycle by clearing all the values just sent.
 	deviceSettingInitDB(cd, null)
 }
 
+
+///Boolean refractory
+///void loginRefractory() { refractory = false }
 
 /* ------------------------------------------------------------------
 
@@ -710,6 +798,9 @@ void settingsAccumWait(data) {
    ------------------------------------------------------------------ */
 
 def login(cd, Boolean fromUnauth = false) {
+///	if (refractory) return 	// we've done a login in the past 600ms
+///	refractory = true
+///	runInMillis( 600, loginRefractory)
 	if (debugOutput) log.debug "Honeywell TCC 'login'"
 	Boolean ofExit = true 	// default: assume that login works and return a True.
 	
@@ -776,6 +867,7 @@ def login(cd, Boolean fromUnauth = false) {
 	        }
             int cookieCount = device.data.cookiess.split(";", -1).length - 1;
             if (cookieCount < 9) {
+            	if (debugOutput) log.debug "cookieCount: $cookieCount" ///
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
 			ofExit = false
             }
@@ -837,6 +929,7 @@ def deviceSettingInitDB(cd, val) { 	 // reset all params, then set individually
 		state.deviceSetting."${dniParts[2]}".FanMode = null
 		state.deviceSetting."${dniParts[2]}".TemporaryHoldUntilTime=null
 		state.deviceSetting."${dniParts[2]}".VacationHold=null
+	//if (debugOutput) log.debug "DeviceSetting: $state.deviceSetting" ///
 	}
 }
 // end of section
