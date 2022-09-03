@@ -14,8 +14,8 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  * 
+ * csteele: v2.0.5   added initialize call for a new device
  * csteele: v2.0.4   added Delete Outdoor Children and Delete Thermostat
- *			   remediated cron scheduling (x % y / y)
  * csteele: v2.0.3   corrected PermHold to be a code value
  * csteele: v2.0.2   corrected logic errors in Poll
  *			   renamed 
@@ -34,14 +34,14 @@
 
 
 metadata {
-    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true) {
+    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true, importUrl: "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy") {
         capability "Thermostat"
-        capability "Refresh"
         capability "Actuator"
+        capability "Sensor"
         capability "Polling"
         capability "Temperature Measurement"
-        capability "Sensor"
         capability "Relative Humidity Measurement"
+        capability "Refresh"
 
         attribute  "outdoorHumidity",    "number"
         attribute  "outdoorTemperature", "number"
@@ -124,10 +124,10 @@ void poll() {
 void installed() {
 	log.info "Installed..."
 	device.updateSetting("txtEnable",[type:"bool",value:true])
+	parent?.componentInitialize(this.device)
 }
 
 void parse(String description) { log.warn "parse(String description) not implemented" }
-
 void parse(List description) {
 	description.each {
             if (txtEnable) log.info it.descriptionText
