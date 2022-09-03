@@ -16,6 +16,8 @@
  *
  *
  *
+ * csteele: v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint
+ * 			     added componentInitialize
  * csteele: v2.0.10  removed number typing on setCoolingSetpoint and setHeatingSetpoint used by Thermostat Controller app
  * csteele: v2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.
  * 			     round curTemp to 2 places.
@@ -61,7 +63,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.10"  }
+ public static String version()	{  return "v2.0.11"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -93,13 +95,10 @@ metadata {
 }
 
 
-
-
 void updated(){
 	log.info "updated..."
 	log.warn "debug logging is: ${debugOutput == true}"
 	log.warn "description logging is: ${descTextEnable == true}"
-	if (debugOutput) runIn(1800,logsOff)
 }
 
 // parse events into attributes
@@ -180,7 +179,6 @@ void componentDeleteThermostatChild(id) {
 	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
 }
 
-
 void componentDeleteOutdoorChild(id) {
 	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
 	cdd.each { 
@@ -193,6 +191,20 @@ void componentDeleteOutdoorChild(id) {
 // a version of refresh for those Outdoor sensors to use.
 void componentRefresh(cd) { 
 	log.info "${cd.displayName} Component Refresh button pushed."
+}
+
+void componentInitialize(cd) { 
+	log.info "${cd.displayName} Component Initialized."
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ['auto', 'circulate', 'on'], descriptionText:"${cd.displayName} Supported Fan Modes defined"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ['auto', 'cool', 'emergency heat', 'heat', 'off'], descriptionText:"${cd.displayName} Supported Modes defined"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value: 75.0, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Cooling Setpoint: 75"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value : 68.0, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Heating Setpoint: 68"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"hysteresis", value: 0.5, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Hysteresis: 0.5"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"temperature", value: 68.0, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Temperature: 68"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatFanMode", value: 'auto', descriptionText:"${cd.displayName} Thermostat Fan Mode: Auto"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value: 'off', descriptionText:"${cd.displayName} Thermostat Mode: Off"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value: 'idle', descriptionText:"${cd.displayName} thermostatOperatingState: Idle"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatSetpoint", value: 68.0, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} thermostatSetpoint: 68"]])
 }
 
 // Thermostat mode section
@@ -255,7 +267,8 @@ void componentSetCoolingSetpoint(cd, val) {
 	deviceSettingInitDB(cd, state.childParamMap."${dniParts[2]}".setPermHold) 	 // reset all params, then set individually
 	state.deviceSetting."${dniParts[2]}".CoolSetpoint = val
 	setStatus(cd)
-	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:val, descriptionText:"${cd.displayName} Cooling Setpoint is ${val}", unit:"°"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:val, descriptionText:"${cd.displayName} Cooling Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatSetpoint", value:val, descriptionText:"${cd.displayName} Thermostat Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
 }
 
 void componentSetHeatingSetpoint(cd, val) {
@@ -267,7 +280,8 @@ void componentSetHeatingSetpoint(cd, val) {
 	deviceSettingInitDB(cd, state.childParamMap."${dniParts[2]}".setPermHold) 	 // reset all params, then set individually
 	state.deviceSetting."${dniParts[2]}".HeatSetpoint = val
 	setStatus(cd)
-	getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value:val, descriptionText:"${cd.displayName} Heating Setpoint is ${val}", unit:"°"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value:val, descriptionText:"${cd.displayName} Heating Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatSetpoint", value:val, descriptionText:"${cd.displayName} Thermostat Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
 }
 
 void componentHeatLevelDown(cd) {
@@ -490,8 +504,6 @@ def getStatusDistrib(cd, Map decodedResult) {
 
 	//Send events 
 	if (hasIndoorHumid == false) { curHumidity = 0 }
-	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ['auto', 'circulate', 'on'], descriptionText:"${cd.displayName} preset Supported Fan Modes"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ['auto', 'cool', 'emergency heat', 'heat', 'off'], descriptionText:"${cd.displayName} preset Supported Thermo Modes"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value:operatingState, descriptionText:"${cd.displayName} Op State was Set to $operatingState"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"fanOperatingState", value:fanState, descriptionText:"${cd.displayName} Fan was Set to $fanState"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:coolSetPoint, descriptionText:"${cd.displayName} Cooling was Set to $coolSetPoint", unit:"°${location.temperatureScale}"]])
