@@ -16,6 +16,7 @@
  *
  *
  *
+ * csteele: v2.0.12  Updated supportedThermostatModes and supportedThermostatFanModes to add double quotes to support HE platform version 2.3.3.x
  * csteele: v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint
  * 			     added componentInitialize
  * csteele: v2.0.10  removed number typing on setCoolingSetpoint and setHeatingSetpoint used by Thermostat Controller app
@@ -63,7 +64,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.11"  }
+ public static String version()	{  return "v2.0.12"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -195,8 +196,8 @@ void componentRefresh(cd) {
 
 void componentInitialize(cd) { 
 	log.info "${cd.displayName} Component Initialized."
-	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ['auto', 'circulate', 'on'], descriptionText:"${cd.displayName} Supported Fan Modes defined"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ['auto', 'cool', 'emergency heat', 'heat', 'off'], descriptionText:"${cd.displayName} Supported Modes defined"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatFanModes", value: ["\"auto\"", "\"circulate\"", "\"on\""], descriptionText:"${cd.displayName} Supported Fan Modes defined"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"supportedThermostatModes", value: ["\"auto\"", "\"cool\"", "\"emergency heat\"", "\"heat\"", "\"off\""], descriptionText:"${cd.displayName} Supported Modes defined"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value: 75.0, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Cooling Setpoint: 75"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value : 68.0, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Heating Setpoint: 68"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"hysteresis", value: 0.5, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} Hysteresis: 0.5"]])
