@@ -16,6 +16,7 @@
  *
  *
  *
+ * csteele: v2.0.13  Updated minimum cookie count to be a variable: minCookieCount.
  * csteele: v2.0.12  Updated supportedThermostatModes and supportedThermostatFanModes to add double quotes to support HE platform version 2.3.3.x
  * csteele: v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint
  * 			     added componentInitialize
@@ -64,7 +65,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.12"  }
+ public static String version()	{  return "v2.0.13"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -151,7 +152,7 @@ void logsOff(){
 // child (component) device methods
 //
 void componentDoRefresh(cd, Boolean fromUnauth = false) {
-	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', units: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
+	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', unit: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
 	if ( !login(cd, fromUnauth) ) {
 		pauseExecution(6000)
 		if ( !login(cd, fromUnauth) ) {
@@ -179,6 +180,7 @@ void componentDeleteThermostatChild(id) {
 	state.deviceSetting = state.deviceSetting.findAll { it.key != dniParts[2] }
 	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
 }
+
 
 void componentDeleteOutdoorChild(id) {
 	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
@@ -609,8 +611,7 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p30 = pair3[0]
 		
 	    		HumMax = p30.toInteger() 
-		
-		}
+			}
 	}
         
      	//Send events via Child
@@ -704,6 +705,7 @@ void settingsAccumWait(data) {
 		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 	}
 
+
 	// prepare for the next cycle by clearing all the values just sent.
 	deviceSettingInitDB(cd, null)
 }
@@ -726,7 +728,8 @@ void settingsAccumWait(data) {
 def login(cd, Boolean fromUnauth = false) {
 	if (debugOutput) log.debug "Honeywell TCC 'login'"
 	Boolean ofExit = true 	// default: assume that login works and return a True.
-	
+	int minCookieCount = 8
+
 	Map params = [
 		uri: "https://${tccSite()}/portal/",
 		headers: [
@@ -789,7 +792,7 @@ def login(cd, Boolean fromUnauth = false) {
 	            }
 	        }
             int cookieCount = device.data.cookiess.split(";", -1).length - 1;
-            if (cookieCount < 9) {
+            if (cookieCount < minCookieCount) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
 			ofExit = false
             }
