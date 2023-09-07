@@ -4,7 +4,7 @@
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
         "dateReleased": "2023-09-06",
-        "releaseNotes": "PARENT\n   v2.0.13  Updated minimum cookie count to be a variable: minCookieCount.\n    v2.0.12  Updated supportedThermostatModes and supportedThermostatFanModes to add double quotes to support HE platform version 2.3.3.x\n   v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint\n. added componentInitialize",
+        "releaseNotes": "PARENT\n   v2.0.15  Added a style to Username/pw parameter\n   v2.0.14  refactored setStatus to only send non-null values, eg. only changed values.   v2.0.13  Updated minimum cookie count to be a variable: minCookieCount.\n    v2.0.12  Updated supportedThermostatModes and supportedThermostatFanModes to add double quotes to support HE platform version 2.3.3.x\n   v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint\n. added componentInitialize\n\nCHILD:\n   v2.0.6   Added a hint for Device ID parameter",
         "category": "Control",
         "tags": "Tools & Utilities",
         "drivers": [{
