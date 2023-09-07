@@ -16,6 +16,8 @@
  *
  *
  *
+ * csteele: v2.0.15  Added a style to Username/pw parameter
+ * csteele: v2.0.14  refactored setStatus to only send non-null values, eg. only changed values.
  * csteele: v2.0.13  Updated minimum cookie count to be a variable: minCookieCount.
  * csteele: v2.0.12  Updated supportedThermostatModes and supportedThermostatFanModes to add double quotes to support HE platform version 2.3.3.x
  * csteele: v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint
@@ -65,7 +67,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.13"  }
+ public static String version()	{  return "v2.0.15"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -89,8 +91,8 @@ metadata {
 	}
 
 	preferences {
-	   input name: "username", type: "text", title: "Username", description: "Your Total Comfort User Name", required: true
-	   input name: "password", type: "password", title: "Password", description: "Your Total Comfort password",required: true
+	   input name: "username", type: "text", title: "<b>Username</b>", description: "<i>Your Total Comfort User Name</i><p>", required: true
+	   input name: "password", type: "password", title: "<b>Password</b>", description: "<i>Your Total Comfort password</i><p>",required: true
 	   input name: "debugOutput", type: "bool", title: "Enable debug logging?", defaultValue: true
 	   input name: "descTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
 	}
@@ -180,7 +182,6 @@ void componentDeleteThermostatChild(id) {
 	state.deviceSetting = state.deviceSetting.findAll { it.key != dniParts[2] }
 	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
 }
-
 
 void componentDeleteOutdoorChild(id) {
 	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
@@ -515,7 +516,7 @@ def getStatusDistrib(cd, Map decodedResult) {
 
 	if (state.childParamMap."${dniParts[2]}".haveHumidifier == 'Yes') {
 		// kludge to figure out if humidifier is on, fan has to be auto, and if fan is on but not heat/cool and we have enabled the humidifyer it should be humidifying"
-	     
+
 	 	if ((fanIsRunning == true) && (equipmentStatus == 0) && (fanMode == 0)) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierStatus", value:"Humidifying", descriptionText:"${cd.displayName} Humidifier was Set to Humidifying"]])
 		} 
@@ -611,7 +612,8 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p30 = pair3[0]
 		
 	    		HumMax = p30.toInteger() 
-			}
+		
+		}
 	}
         
      	//Send events via Child
@@ -657,6 +659,12 @@ void settingsAccumWait(data) {
 	if (debugOutput) log.debug "Honeywell TCC 'setStatus'"
 	def today = new Date()
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+	// build the body: with non-null pairs.
+	def deltaStates = state.deviceSetting."${dniParts[2]}".findAll{it.value != null}
+	deltaStates["DeviceID"] = state.childParamMap."${dniParts[2]}".honeywelldevice
+	deltaStates["DisplayUnits"] = location.temperatureScale
+	if (debugOutput) log.debug "chgStates: $chgStates"
+
 	
 	def params = [
 	    uri: "https://${tccSite()}/portal/Device/SubmitControlScreenChanges",
@@ -673,24 +681,11 @@ void settingsAccumWait(data) {
 	        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
 	        'Cookie': device.data.cookiess
 	    ],
-	    body: [
-	        DeviceID: "${state.childParamMap."${dniParts[2]}".honeywelldevice}",
-	        DisplayUnits: location.temperatureScale,
-	        SystemSwitch: state.deviceSetting."${dniParts[2]}".SystemSwitch,
-	        HeatSetpoint: state.deviceSetting."${dniParts[2]}".HeatSetpoint,
-	        CoolSetpoint: state.deviceSetting."${dniParts[2]}".CoolSetpoint,
-	        HeatNextPeriod: state.deviceSetting."${dniParts[2]}".HeatNextPeriod,
-	        CoolNextPeriod: state.deviceSetting."${dniParts[2]}".CoolNextPeriod,
-	        StatusHeat: state.deviceSetting."${dniParts[2]}".StatusHeat,
-	        StatusCool: state.deviceSetting."${dniParts[2]}".StatusCool,
-	        fanMode: state.deviceSetting."${dniParts[2]}".FanMode,
-	        TemporaryHoldUntilTime: state.deviceSetting."${dniParts[2]}".TemporaryHoldUntilTime,
-	        VacationHold: state.deviceSetting."${dniParts[2]}".VacationHold
-	    ],
+	    body: deltaStates,
 	  timeout: 10
 	]
 
-	if (debugOutput) log.debug "params = $params"
+	if (debugOutput) log.debug "setStatus params = $params"
 	try {
 		httpPost(params) {
 		    resp ->
@@ -704,7 +699,6 @@ void settingsAccumWait(data) {
 		log.error "Something went wrong: $e"
 		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 	}
-
 
 	// prepare for the next cycle by clearing all the values just sent.
 	deviceSettingInitDB(cd, null)
