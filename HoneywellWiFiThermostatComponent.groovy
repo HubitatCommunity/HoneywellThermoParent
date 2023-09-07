@@ -17,7 +17,6 @@
  * csteele: v2.0.6   Added a hint for Device ID parameter
  * csteele: v2.0.5   added initialize call for a new device
  * csteele: v2.0.4   added Delete Outdoor Children and Delete Thermostat
- *			   remediated cron scheduling (x % y / y)
  * csteele: v2.0.3   corrected PermHold to be a code value
  * csteele: v2.0.2   corrected logic errors in Poll
  *			   renamed 
@@ -31,13 +30,12 @@
  * csteele: v1.3.20  Added "emergency/auxiliary" heat.
  *                    added fanOperatingState Attribute.
 **/
-/// DEVELOPMENT FORK
 
  public static String version()     {  return "v2.0.6"  }
 
 
 metadata {
-    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true) {
+    definition(name: "Honeywell WiFi Thermostat Component", namespace: "csteele", author: "CSteele", component: true, importUrl: "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy") {
         capability "Thermostat"
         capability "Actuator"
         capability "Sensor"
@@ -67,7 +65,6 @@ metadata {
         command	 "setLastRunningMode"	// does nothing in this UI
         command    "caution_deleteOutdoorDevices"
         command    "caution_deleteThisThermostat"
-        command    "caution_createOutdoorDevices" ///
 
 /* -= Attribute List =-
  	[thermostatFanMode, humidifierLowerLimit, supportedThermostatFanModes, supportedThermostatModes, followSchedule, humidifierSetPoint, thermostatSetpoint, 
@@ -132,7 +129,6 @@ void installed() {
 }
 
 void parse(String description) { log.warn "parse(String description) not implemented" }
-
 void parse(List description) {
 	description.each {
             if (txtEnable) log.info it.descriptionText
@@ -140,12 +136,6 @@ void parse(List description) {
     }
 }
 
-///*
-void caution_createOutdoorDevices() {
-    parent?.createOutdoorDevices(this.device)
-}
-
-///*/
 void caution_deleteThisThermostat() {
     parent?.componentDeleteThermostatChild(this.device)
 }
