@@ -14,6 +14,7 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  * 
+ * csteele: v2.0.7   changed schedule(refresh) to be NOT the 00 second
  * csteele: v2.0.6   Added a hint for Device ID parameter
  * csteele: v2.0.5   added initialize call for a new device
  * csteele: v2.0.4   added Delete Outdoor Children and Delete Thermostat
@@ -30,8 +31,9 @@
  * csteele: v1.3.20  Added "emergency/auxiliary" heat.
  *                    added fanOperatingState Attribute.
 **/
+/// DEVELOPMENT FORK
 
- public static String version()     {  return "v2.0.6"  }
+ public static String version()     {  return "v2.0.7"  }
 
 
 metadata {
@@ -115,7 +117,7 @@ void poll() {
 	    String pIntMinute = (pIminute == 60 || pIminute == 0) ? "${boutNow.minutes}" : "${boutNow.minutes % pIminute}/$pIminute"
 	    String pIntHour = (pIhour < 1) ? "*" : "*/$pIhour"
 
-      	schedule("0 $pIntMinute $pIntHour ? * *", refresh) 
+	    schedule("11 $pIntMinute $pIntHour ? * *", refresh) 
 	}
 
 	// clicking Poll means do at least one refresh, even if there's no poll interval
