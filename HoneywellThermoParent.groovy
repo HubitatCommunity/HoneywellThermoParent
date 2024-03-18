@@ -16,6 +16,8 @@
  *
  *
  *
+ * csteele: v2.0.16  Added Quick Reference Link
+ * 			     Merged lgk retry on status error logic
  * csteele: v2.0.15  Added a style to Username/pw parameter
  * csteele: v2.0.14  refactored setStatus to only send non-null values, eg. only changed values.
  * csteele: v2.0.13  Updated minimum cookie count to be a variable: minCookieCount.
@@ -67,7 +69,7 @@
 
 import groovy.transform.Field
 
- public static String version()	{  return "v2.0.15"  }
+ public static String version()	{  return "v2.0.16"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -93,6 +95,7 @@ metadata {
 	preferences {
 	   input name: "username", type: "text", title: "<b>Username</b>", description: "<i>Your Total Comfort User Name</i><p>", required: true
 	   input name: "password", type: "password", title: "<b>Password</b>", description: "<i>Your Total Comfort password</i><p>",required: true
+	   input name: "quickref", type: "hidden", title:"<a href='https://www.hubitatcommunity.com/QuikRef/honeywellThermoDriverInfo/index.html' target='_blank'>Quick Reference ${version()}</a>"
 	   input name: "debugOutput", type: "bool", title: "Enable debug logging?", defaultValue: true
 	   input name: "descTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
 	}
@@ -163,7 +166,7 @@ void componentDoRefresh(cd, Boolean fromUnauth = false) {
 		}
 	}
 	getHumidifierStatus(cd, fromUnauth)
-	getStatus(cd)
+	getStatus(cd, fromUnauth)
 }
 
 void componentDeleteThermostatChild(id) { 
@@ -380,7 +383,7 @@ void setOutdoorHumidity(cd, value){
 
 /* ------------------------------------------------------------------
 
-	getStatus(cd)
+	getStatus(cd, fromUnauth)
 
 	Purpose: Acquire settings from the Thermostat
 
@@ -388,10 +391,11 @@ void setOutdoorHumidity(cd, value){
 	       
    ------------------------------------------------------------------ */
 
-def getStatus(cd) {
+def getStatus(cd, Boolean fromUnauth = false) {
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
 	if (debugOutput) log.debug "enable outside temps = ${state.childParamMap."${dniParts[2]}".enableOutdoorTemps}"
 	def today = new Date()
+	state.fromUnauth = fromUnauth
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 	//if (debugOutput) log.debug "https://${tccSite()}/portal/Device/CheckDataSession/${settings.honeywelldevice}?_=$today.time"
 
@@ -420,9 +424,9 @@ def getStatus(cd) {
 }
 
 def getStatusHandler (resp, data) {
+	def cdd = data["cd"]
+	def cd = getChildDevice(cdd.deviceNetworkId)
 	try {
-		def cdd = data["cd"]
-		def cd = getChildDevice(cdd.deviceNetworkId)
 		String[] dniParts = cd.deviceNetworkId.split("[-_]")
 		if (resp.getStatus() == 200 || resp.getStatus() == 207) {
 			Map setStatusResult = parseJson(resp.data)
@@ -440,9 +444,16 @@ def getStatusHandler (resp, data) {
 		}
     }
 	catch (e) {
-		log.error "getStatus response invalid: $e"
+		if (debugOutput) log.error "getStatus response invalid: $e"
 		if (descTextEnable) log.info "TCC getStatus failed for ${cd.displayName}"
 		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+		if (state.fromUnauth)  {
+		        log.warn "2nd failure ... giving up!"
+		} else { 
+			log.warn "First failure, Trying again in 60 seconds.!"
+			def pData = [data:['cd':[cd.deviceNetworkId]]]
+			runIn(60,"refreshFromRunin", pData)
+		}     
     }	
 }
 
