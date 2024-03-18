@@ -31,7 +31,6 @@
  * csteele: v1.3.20  Added "emergency/auxiliary" heat.
  *                    added fanOperatingState Attribute.
 **/
-/// DEVELOPMENT FORK
 
  public static String version()     {  return "v2.0.7"  }
 
