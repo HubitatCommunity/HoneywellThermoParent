@@ -4,12 +4,12 @@
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
         "dateReleased": "2024-03-18",
-        "releaseNotes": "PARENT\n   v2.0.16  Added Quick Reference Link\n         Merged lgk retry on status error logic\n   v2.0.15  Added a style to Username/pw parameter\n   v2.0.14  refactored setStatus to only send non-null values, eg. only changed values.",
+        "releaseNotes": "v2.0.18  Added preference for EmergencyHeat to use either 0 or 4 to support more thermostat models\n         isEmergencyHeatAllowed added to state. per bdunbar analysis\nv2.0.16  Added Quick Reference Link\n         Merged lgk retry on status error logic",
         "tags": "Tools & Utilities",
         "drivers": [{
                 "id": "f991de80-143f-49c8-a127-7996e972ed58",
                 "name": "Honeywell Thermo Parent",
-                "version": "2.0.16",
+                "version": "2.0.18",
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy",
                 "required": true,
@@ -18,7 +18,7 @@
         {
                 "id": "a9695dd9-984c-49bc-a916-2c2f21013d29",
                 "name": "Honeywell WiFi Thermostat Component",
-                "version": "2.0.7",
+                "version": "2.0.8",
                 "namespace": "csteele",
                 "location": "https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellWiFiThermostatComponent.groovy",
                 "required": true,
