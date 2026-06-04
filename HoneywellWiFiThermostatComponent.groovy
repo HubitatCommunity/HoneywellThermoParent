@@ -14,10 +14,12 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  * 
+ * csteele: v2.0.8   added emergencyHeatCommand value to support more thermostat models
  * csteele: v2.0.7   changed schedule(refresh) to be NOT the 00 second
  * csteele: v2.0.6   Added a hint for Device ID parameter
  * csteele: v2.0.5   added initialize call for a new device
  * csteele: v2.0.4   added Delete Outdoor Children and Delete Thermostat
+ *			   remediated cron scheduling (x % y / y)
  * csteele: v2.0.3   corrected PermHold to be a code value
  * csteele: v2.0.2   corrected logic errors in Poll
  *			   renamed 
@@ -32,7 +34,7 @@
  *                    added fanOperatingState Attribute.
 **/
 
- public static String version()     {  return "v2.0.7"  }
+ public static String version()     {  return "v2.0.8"  }
 
 
 metadata {
@@ -70,7 +72,7 @@ metadata {
 /* -= Attribute List =-
  	[thermostatFanMode, humidifierLowerLimit, supportedThermostatFanModes, supportedThermostatModes, followSchedule, humidifierSetPoint, thermostatSetpoint, 
  	coolingSetpoint, humidifierUpperLimit, outdoorHumidity, temperature, outdoorTemperature, humidifierStatus, lastUpdate, thermostatMode, fanOperatingState, 
- 	thermostatOperatingState, heatingSetpoint, humidity, temperature, TCCstatus]
+ 	thermostatOperatingState, heatingSetpoint, humidity, temperature, TCCstatus, emergencyHeatCommand]
 
    -= Command List =-
  	[auto, cool, coolLevelDown, coolLevelUp, emergencyHeat, fanAuto, fanCirculate, fanOn, heat, heatLevelDown, heatLevelUp, off, 
@@ -86,6 +88,7 @@ metadata {
        input name: "enableHumidity", type: "enum", title: "Do you have the optional Humidity sensor and want to enable it?", options: ["Yes", "No"], required: false, defaultValue: "No"
        input name: "setPermHold", type: "enum", title: "Will Setpoints be temporary or permanent?", options: ["Temporary", "Permanent"], required: false, defaultValue: "Temporary"
        input name: "pollIntervals", type: "enum", title: "Set the Poll Interval.", options: [0:"off", 60:"1 minute", 120:"2 minutes", 180:"3 minutes", 300:"5 minutes",600:"10 minutes",900:"15 minutes",1800:"30 minutes",3600:"60 minutes"], required: true, defaultValue: "600"
+       input name: "emergencyHeatCommand", type: "enum", title: "Set the Emergency Heat Command Value.", options: [0:"Zero", 4:"Four"], required: true, defaultValue: 4
        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
 }
@@ -95,12 +98,13 @@ void updated() {
 	log.warn "description logging is: ${txtEnable == true}"
 	runInMillis( 200, parentUpdate)
 	runInMillis( 400, poll)
+
 }
 
 void parentUpdate() {
 	if (setPermHold == "Permanent") { PermHoldCode = 2 } else { PermHoldCode = 1 }
 	String cd = device.deviceNetworkId
-	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, PermHoldCode, pollIntervals)
+	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, PermHoldCode, pollIntervals, emergencyHeatCommand)
 }
 
 
@@ -130,12 +134,14 @@ void installed() {
 }
 
 void parse(String description) { log.warn "parse(String description) not implemented" }
+
 void parse(List description) {
 	description.each {
             if (txtEnable) log.info it.descriptionText
             sendEvent(it)
     }
 }
+
 
 void caution_deleteThisThermostat() {
     parent?.componentDeleteThermostatChild(this.device)
