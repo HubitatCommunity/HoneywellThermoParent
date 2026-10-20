@@ -5,7 +5,7 @@
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
         "dateReleased": "2024-03-18",
-        "releaseNotes": "v2.0.18  Added preference for EmergencyHeat to use either 0 or 4 to support more thermostat models\n         isEmergencyHeatAllowed added to state. per bdunbar analysis\nv2.0.16  Added Quick Reference Link\n         Merged lgk retry on status error logic",
+        "releaseNotes": "v2.0.19  Retain one Parent-owned TCC session across child refreshes and commands\nv2.0.18  Added preference for EmergencyHeat to use either 0 or 4 to support more thermostat models\n         isEmergencyHeatAllowed added to state. per bdunbar analysis",
         "tags": "Tools & Utilities",
         "drivers": [{
                 "id": "f991de80-143f-49c8-a127-7996e972ed58",
