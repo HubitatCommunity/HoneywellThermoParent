@@ -16,34 +16,45 @@
  *
  *
  *
+ * csteele: v2.0.19  Retain one Parent-owned TCC session across child refreshes and commands to reduce
+ *                    unnecessary logins and Honeywell rate-limit pressure. Cookie count remains an
+ *                    empirical confidence check; valid thermostat data confirms the session. Login
+ *                    contention defers instead of blocking or starting an unlocked second login.
+ *                    Session rejection is generation-aware, and failed POSTs retain unsent settings.
+ *                    Async status errors no longer read missing response data or discard a session
+ *                    merely because a request timed out or Honeywell returned a human-readable page.
+ *                    Status GETs close their HTTP connection so a poll after a long idle interval
+ *                    does not attempt to reuse a stale keep-alive connection.
+ *                    Transient status failures wait for the normal poll instead of adding another
+ *                    request; only explicit authentication rejection gets one 60-second retry.
  * csteele: v2.0.18  Added preference for EmergencyHeat to use either 0 or 4 to support more thermostat models
- * 			     isEmergencyHeatAllowed added to state. per bdunbar analysis
+ *                    isEmergencyHeatAllowed added to state. per bdunbar analysis
  * csteele: v2.0.17  componentInitialize in C or F
  * csteele: v2.0.16  Added Quick Reference Link
- * 			     Merged lgk retry on status error logic
+ *                    Merged lgk retry on status error logic
  * csteele: v2.0.15  Added a style to Username/pw parameter
  * csteele: v2.0.14  refactored setStatus to only send non-null values, eg. only changed values.
  * csteele: v2.0.13  Updated minimum cookie count to be a variable: minCookieCount.
  * csteele: v2.0.12  Updated supportedThermostatModes and supportedThermostatFanModes to add double quotes to support HE platform version 2.3.3.x
  * csteele: v2.0.11  populate thermostatSetoint attribute with most recent heat or cool setpoint
- * 			     added componentInitialize
+ *                    added componentInitialize
  * csteele: v2.0.10  removed number typing on setCoolingSetpoint and setHeatingSetpoint used by Thermostat Controller app
  * csteele: v2.0.9   corrected log.info lines to be qualified by descTextEnable vs debugOutput.
- * 			     round curTemp to 2 places.
- * 			     preset supportedThermostatFanModes & supportedThermostatModes used by Thermostat Controller app.
+ *                    round curTemp to 2 places.
+ *                    preset supportedThermostatFanModes & supportedThermostatModes used by Thermostat Controller app.
  * csteele: v2.0.8   corrected "refresh()" in "refreshFromRunin" to be "componentDoRefresh()"
  * csteele: v2.0.7   corrected "nextChild" to correctly increment as a number, not asci increment
- *			     used the same split("[-_]") string to prevent future typos
+ *                    used the same split("[-_]") string to prevent future typos
  * csteele: v2.0.6   added Delete Outdoor Child and Delete Thermostat
- *			     fixed cron string to run the whole hour (x mod y / y) 
+ *                    fixed cron string to run the whole hour (x mod y / y) 
  * csteele: v2.0.5   login returns true/false allowing refresh to retry login
  * csteele: v2.0.4   refactored "getStatus" and "getHumidityStatus" to minimize try/catch scope
- *			     reorganized methods to clump Fan methods together, to clump Mode methods together, etc.
- *			     "getHumidityStatus" using asynchttpGet
- *			     refactored all the set heat/cool/up/down 
+ *                    reorganized methods to clump Fan methods together, to clump Mode methods together, etc.
+ *                    "getHumidityStatus" using asynchttpGet
+ *                    refactored all the set heat/cool/up/down 
  * csteele: v2.0.3   refactored "setStatus" to accumulate UI button clicks
- *			     clarified some status/log messages
- *			     added both Outdoor Child devices
+ *                    clarified some status/log messages
+ *                    added both Outdoor Child devices
  * csteele: v2.0.2   put childParamMap into "state"
  * csteele: v2.0.1   Put setLastRunningMode into Child
  * csteele: v2.0.0   Initial Commit
@@ -71,14 +82,25 @@
 */
 
 import groovy.transform.Field
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 
- public static String version()	{  return "v2.0.18"  }
+ public static String version()	{  return "v2.0.19"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
 @Field static Map<String, Map> modeMap4 = [auto:5, cool:3, heat:1, off:2, 'emergency heat':4]
 @Field static Map<String, Map> modeMap0 = [auto:5, cool:3, heat:1, off:2, 'emergency heat':0]
 @Field static Map<String, Map> fanMap = [auto:0, on:1, circulate:2, followSchedule:3] 
+
+// Cookies and session metadata are owned by the Parent so every thermostat child can reuse
+// one TCC login. The static semaphore is coordination only; session retention does not depend
+// on static fields surviving a driver reload or hub reboot.
+@Field static ConcurrentHashMap<String, Semaphore> tccLoginLocks = new ConcurrentHashMap<String, Semaphore>()
+@Field static final Integer loginBackoffSeconds = 60
+@Field static final Integer loginDeferredSeconds = 2
+@Field static final Integer minCookieCount = 8
+@Field static final Integer statusRequestTimeoutSeconds = 10
 
 metadata {
 	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "C Steele, Eric Thomas, lg kahn") {
@@ -107,26 +129,12 @@ metadata {
 
 
 
-void listThermostats() {
-	def cd = getChildDevices()?.findAll { it.deviceNetworkId > "${device.id}-${type()}"}
-	if (debugOutput) log.debug "listThermostats: $cd"
-}
-
-void createOutdoorDevices(cd) {
-	cdd = addChildDevice("hubitat", "Generic Component Humidity Sensor", "${cd.id}-Humidity", [name: "Outdoor Humidity", isComponent: true])
-	cdd = addChildDevice("hubitat", "Generic Component Temperature Sensor", "${cd.id}-Temperature", [name: "Outdoor Temperature", isComponent: true])
-}
-
-List<String> configure() {
-	log.warn "configure..."
-	runIn(1800,logsOff)
-}
-
 
 void updated(){
 	log.info "updated..."
 	log.warn "debug logging is: ${debugOutput == true}"
 	log.warn "description logging is: ${descTextEnable == true}"
+	clearTccSession() // credentials may have changed
 }
 
 // parse events into attributes
@@ -179,15 +187,23 @@ void logsOff(){
 //
 void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', unit: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
-	if ( !login(cd, fromUnauth) ) {
-		pauseExecution(6000)
-		if ( !login(cd, fromUnauth) ) {
+	Map session = getTccSession(cd)
+	if (session.status != "ready") {
+		Integer delay = (session.retryAfter ?: loginBackoffSeconds) as Integer
+		if (session.status == "deferred") {
+			if (debugOutput) log.debug "${cd.displayName}: another TCC login is in progress; retrying refresh in ${delay} seconds"
+			scheduleRefreshRetry(cd, delay, fromUnauth)
+		} else if (!fromUnauth) {
+			if (debugOutput) log.debug "${cd.displayName}: TCC login unavailable; retrying refresh in ${delay} seconds"
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+			scheduleRefreshRetry(cd, delay, true)
+		} else {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-			return
 		}
+		return
 	}
-	getHumidifierStatus(cd, fromUnauth)
-	getStatus(cd, fromUnauth)
+	getHumidifierStatus(cd, session.cookies)
+	getStatus(cd, fromUnauth, session)
 }
 
 void componentDeleteThermostatChild(id) { 
@@ -206,7 +222,6 @@ void componentDeleteThermostatChild(id) {
 	state.deviceSetting = state.deviceSetting.findAll { it.key != dniParts[2] }
 	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
 }
-
 
 void componentDeleteOutdoorChild(id) {
 	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
@@ -419,11 +434,10 @@ void setOutdoorHumidity(cd, value){
 	       
    ------------------------------------------------------------------ */
 
-def getStatus(cd, Boolean fromUnauth = false) {
+def getStatus(cd, Boolean fromUnauth = false, Map session = null) {
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
 	if (debugOutput) log.debug "enable outside temps = ${state.childParamMap."${dniParts[2]}".enableOutdoorTemps}"
 	def today = new Date()
-	state.fromUnauth = fromUnauth
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 	//if (debugOutput) log.debug "https://${tccSite()}/portal/Device/CheckDataSession/${settings.honeywelldevice}?_=$today.time"
 
@@ -437,27 +451,44 @@ def getStatus(cd, Boolean fromUnauth = false) {
 	        'Accept-Encoding': 'plain',
 	        'Cache-Control': 'max-age=0',
 	        'Accept-Language': 'en-US,en,q=0.8',
-	        'Connection': 'keep-alive',
+		        'Connection': 'close',
 	        'Referer': "https://${tccSite()}/portal",
 	        'X-Requested-With': 'XMLHttpRequest',
 	        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
-	        'Cookie': device.data.cookiess
+	        'Cookie': session?.cookies
 	    ],
-	  timeout: 10
+		  timeout: statusRequestTimeoutSeconds
 	]
 
-	def pData = [cd:[cd]]
-	if (debugOutput) log.debug "sending getStatus request $params"
+	def pData = [dni:cd.deviceNetworkId, fromUnauth:fromUnauth, sid:session?.sid]
+	if (debugOutput) log.debug "sending getStatus request: ${params.uri}"
 	asynchttpGet("getStatusHandler", params, pData)
 }
 
 def getStatusHandler (resp, data) {
-	def cdd = data["cd"]
-	def cd = getChildDevice(cdd.deviceNetworkId)
+	def cd = getChildDevice(data?.dni)
+	if (!cd) return
+	Boolean sessionRejected = false
 	try {
-		String[] dniParts = cd.deviceNetworkId.split("[-_]")
-		if (resp.getStatus() == 200 || resp.getStatus() == 207) {
-			Map setStatusResult = parseJson(resp.data)
+		if (resp == null) throw new IllegalStateException("async request returned no response")
+		Integer responseStatus = resp.getStatus()
+		sessionRejected = responseStatus in [302, 401, 403]
+		if (resp.hasError()) {
+			String errorMessage = resp.getErrorMessage()
+			throw new IllegalStateException("async request failed (HTTP ${responseStatus})${errorMessage ? ": ${errorMessage}" : ""}")
+		}
+
+		if (responseStatus == 200 || responseStatus == 207) {
+			String responseText = resp.getData()?.toString()?.trim()
+			if (!responseText) throw new IllegalStateException("response contained no data")
+			if (responseText.startsWith("<")) {
+				throw new IllegalStateException("response contained a human-readable page instead of thermostat data")
+			}
+			Map setStatusResult = parseJson(responseText)
+			if (!setStatusResult?.latestData?.uiData) {
+				throw new IllegalStateException("response did not contain thermostat data")
+			}
+			confirmTccSession(data?.sid)
 			//if (debugOutput) { 
 			//    log.debug "Request was successful, $resp.status"
 			//    log.debug "data: $setStatusResult, rdata: $data"
@@ -465,24 +496,28 @@ def getStatusHandler (resp, data) {
 			//    log.debug "ld: $setStatusResult.latestData.fanData"
 			//}
 			getStatusDistrib(cd, setStatusResult)
+			return
 		}
 		else {
-			if (descTextEnable) log.info "TCC getStatus failed for ${cd.displayName}"
-			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+			throw new IllegalStateException("HTTP ${responseStatus}")
 		}
-    }
+	    }
 	catch (e) {
-		if (debugOutput) log.error "getStatus response invalid: $e"
-		if (descTextEnable) log.info "TCC getStatus failed for ${cd.displayName}"
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-		if (state.fromUnauth)  {
-		        log.warn "2nd failure ... giving up!"
-		} else { 
-			log.warn "First failure, Trying again in 60 seconds.!"
-			def pData = [data:['cd':[cd.deviceNetworkId]]]
-			runIn(60,"refreshFromRunin", pData)
-		}     
-    }	
+		if (sessionRejected) invalidateTccSession(data?.sid)
+		if (debugOutput) log.error "getStatus response invalid for ${cd.displayName}: $e"
+		if (sessionRejected && data?.fromUnauth != true) {
+			if (descTextEnable) log.info "TCC session rejected for ${cd.displayName}; retrying login in 60 seconds"
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+			scheduleRefreshRetry(cd, 60, true)
+		} else {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+			if (sessionRejected) {
+				log.warn "${cd.displayName}: status failed after authentication retry; waiting until the next poll."
+			} else {
+				log.warn "${cd.displayName}: transient TCC status failure; waiting until the next poll."
+			}
+		}
+	    }
 }
 
 
@@ -586,7 +621,7 @@ def getStatusDistrib(cd, Map decodedResult) {
 }
 
 
-def getHumidifierStatus(cd, Boolean fromUnauth = false) {
+def getHumidifierStatus(cd, String cookies) {
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
 	if (debugOutput)  log.debug "in get humid status enable humidity = ${state.childParamMap."${dniParts[2]}".enableHumidity}"
 	if (state.childParamMap."${dniParts[2]}".haveHumidifier == 'No') return
@@ -606,13 +641,13 @@ def getHumidifierStatus(cd, Boolean fromUnauth = false) {
             'Referer': "https://${tccSite()}/portal/",
             'X-Requested-With': 'XMLHttpRequest',
             'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
-            'Cookie': device.data.cookiess
+	        'Cookie': cookies
         ],
 	  timeout: 10
     ]
 
-    if (debugOutput) log.debug "sending gethumidStatus request: $params"
-	def pData = [cd:[cd]]
+	if (debugOutput) log.debug "sending gethumidStatus request: ${params.uri}"
+	def pData = [dni:cd.deviceNetworkId]
 	asynchttpGet("getHumidStatusHandler", params, pData)
 }
 
@@ -620,7 +655,8 @@ def getHumidifierStatus(cd, Boolean fromUnauth = false) {
 def getHumidStatusHandler(resp, data) {
 	if(resp.getStatus() == 200 || resp.getStatus() == 207) {
 		if (debugOutput) log.debug "GetHumidity Request was successful, $resp.status"
-		def cdd = data["cd"]
+		def cdd = getChildDevice(data?.dni)
+		if (!cdd) return
 		def response = resp.getData().toString()
 		getHumidifierDistrib (cdd, response)
 	}
@@ -686,25 +722,38 @@ void setStatus(cd) {
 }
 
 void settingsAccumWait(data) {
-	def cdd = data["cd"]
+	def cdd = data?.dni ?: data["cd"]
+	if (cdd instanceof List) cdd = cdd[0]
+	Integer authRetry = (data?.authRetry ?: 0) as Integer
 	def cd = getChildDevice(cdd)
+	if (!cd) return
+	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+	// Snapshot only the settings currently waiting to be sent. A retry after another
+	// handler has already sent them must not submit an empty control request.
+	def deltaStates = state.deviceSetting."${dniParts[2]}".findAll{it.value != null}
+	if (!deltaStates) return
+
 	device.data.SetStatus = 0
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
 
-	if ( !login(cd, fromUnauth) ) {
-		pauseExecution(6000)
-		if ( !login(cd, fromUnauth) ) {
+	Map session = getTccSession(cd)
+	if (session.status != "ready") {
+		if (session.status == "deferred") {
+			Integer delay = (session.retryAfter ?: loginDeferredSeconds) as Integer
+			if (debugOutput) log.debug "${cd.displayName}: another TCC login is in progress; retrying settings in ${delay} seconds"
+			runIn(delay, "settingsAccumWait", [overwrite:false, data:[dni:cd.deviceNetworkId, authRetry:authRetry]])
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+		} else {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-			return
 		}
+		return // retain the unsent settings for a later attempt
 	}
 	if (debugOutput) log.debug "Honeywell TCC 'setStatus'"
 	def today = new Date()
-	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	// build the body: with non-null pairs.
-	def deltaStates = state.deviceSetting."${dniParts[2]}".findAll{it.value != null}
 	deltaStates["DeviceID"] = state.childParamMap."${dniParts[2]}".honeywelldevice
 	deltaStates["DisplayUnits"] = location.temperatureScale
+	if (debugOutput) log.debug "setStatus body: $deltaStates"
+
 	
 	def params = [
 	    uri: "https://${tccSite()}/portal/Device/SubmitControlScreenChanges",
@@ -719,52 +768,131 @@ void settingsAccumWait(data) {
 	        'Referer': "https://${tccSite()}/portal/Device/Control/${state.childParamMap."${dniParts[2]}".honeywelldevice}",
 	        'X-Requested-With': 'XMLHttpRequest',
 	        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
-	        'Cookie': device.data.cookiess
+	        'Cookie': session.cookies
 	    ],
 	    body: deltaStates,
 	  timeout: 10
 	]
 
-	if (debugOutput) log.debug "setStatus params = $params"
+	Boolean sent = false
+	Boolean authRejected = false
 	try {
 		httpPost(params) {
 		    resp ->
 			def setStatusResult = resp.data
 			if (debugOutput) log.debug "Request was successful, $resp.status"
 			device.data.SetStatus = 1
+			sent = true
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
 		}
 	} 
 	catch (e) {
+		if (e instanceof groovyx.net.http.HttpResponseException && e.statusCode in [302, 401, 403]) {
+			authRejected = true
+			invalidateTccSession(session.sid)
+		}
 		log.error "Something went wrong: $e"
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+		if (authRejected && authRetry < 1) {
+			runIn(loginBackoffSeconds, "settingsAccumWait", [overwrite:false, data:[dni:cd.deviceNetworkId, authRetry:authRetry + 1]])
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+		} else {
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+		}
 	}
 
-	// prepare for the next cycle by clearing all the values just sent.
-	deviceSettingInitDB(cd, null)
+
+
+	// Clear only the values in the successful snapshot. Commands that arrived while
+	// the POST was in progress remain pending for their own scheduled send.
+	if (sent) clearSentDeviceSettings(cd, deltaStates)
 }
 
 
 
 /* ------------------------------------------------------------------
 
-	login
+	TCC session retention
 
-	Purpose: Login to Honeywell's Total Connect Comfort API
-
-	Notes: Collects the cookies the site sends for subsequent interactions:
-	       getHumidifierStatus() getStatus() each rely on login and the cookies
-	       componentDoRefresh() setStatus() call login themselves
-	       
-	       login does not use the Honeywell Device ID
+	Purpose: Keep one Parent-owned session for all thermostat children. Cookie
+	         count remains an empirical confidence check because Honeywell does
+	         not reliably return a known cookie set. Valid thermostat data is the
+	         final confirmation that a candidate session works.
 
    ------------------------------------------------------------------ */
 
-def login(cd, Boolean fromUnauth = false) {
-	if (debugOutput) log.debug "Honeywell TCC 'login'"
-	Boolean ofExit = true 	// default: assume that login works and return a True.
-	int minCookieCount = 8
+private String tccSessionKey() { device.id.toString() }
 
+private Map tccSessionSnapshot() {
+	String cookies = device.getDataValue("cookiess") ?: device.data?.cookiess
+	if (!cookies) return null
+	Map meta = (state.tccSession instanceof Map) ? state.tccSession : [:]
+	if (!meta.sid) {
+		meta = [sid:"legacy-${now()}", created:now(), confirmed:false, cookieCount:cookies.split(";", -1).length - 1]
+		state.tccSession = meta
+	}
+	return [cookies:cookies, sid:meta.sid, confirmed:meta.confirmed == true, cookieCount:meta.cookieCount]
+}
+
+private Map getTccSession(cd) {
+	Map session = tccSessionSnapshot()
+	if (session) return [status:"ready"] + session
+
+	String key = tccSessionKey()
+	tccLoginLocks.putIfAbsent(key, new Semaphore(1))
+	Semaphore lock = tccLoginLocks.get(key)
+	if (!lock.tryAcquire()) return [status:"deferred", retryAfter:loginDeferredSeconds]
+
+	try {
+		session = tccSessionSnapshot()
+		if (session) return [status:"ready"] + session // another child completed login
+
+		Long failedAt = state.tccLoginFailedAt as Long
+		if (failedAt) {
+			Long remaining = (loginBackoffSeconds * 1000L) - (now() - failedAt)
+			if (remaining > 0) {
+				Integer seconds = Math.max(1, ((remaining + 999L) / 1000L) as Integer)
+				return [status:"backoff", retryAfter:seconds]
+			}
+		}
+
+		Map candidate = performTccLogin(cd)
+		if (!candidate) {
+			state.tccLoginFailedAt = now()
+			return [status:"failed", retryAfter:loginBackoffSeconds]
+		}
+
+		String sid = now().toString()
+		device.updateDataValue("cookiess", candidate.cookies)
+		state.tccSession = [sid:sid, created:now(), confirmed:false, cookieCount:candidate.cookieCount, authCookieSeen:candidate.authCookieSeen]
+		state.tccLoginFailedAt = null
+		return [status:"ready", cookies:candidate.cookies, sid:sid, confirmed:false, cookieCount:candidate.cookieCount]
+	} finally {
+		lock.release()
+	}
+}
+
+private void confirmTccSession(sid) {
+	Map meta = (state.tccSession instanceof Map) ? state.tccSession : null
+	if (meta?.sid && "${meta.sid}" == "${sid}") {
+		meta.confirmed = true
+		meta.confirmedAt = now()
+		state.tccSession = meta
+	}
+}
+
+private void invalidateTccSession(sid = null) {
+	Map meta = (state.tccSession instanceof Map) ? state.tccSession : null
+	if (sid == null || !meta?.sid || "${meta.sid}" == "${sid}") clearTccSession()
+}
+
+private void clearTccSession() {
+	device.updateDataValue("cookiess", "")
+	state.tccSession = null
+	state.tccLoginFailedAt = null
+}
+
+private Map performTccLogin(cd) {
+	if (debugOutput) log.debug "Honeywell TCC 'login'"
 	Map params = [
 		uri: "https://${tccSite()}/portal/",
 		headers: [
@@ -776,85 +904,53 @@ def login(cd, Boolean fromUnauth = false) {
 			'Origin': "https://${tccSite()}/portal/",
 			'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36'
 		],
-		body: [timeOffset: '240', UserName: "${settings.username}", Password: "${settings.password}", RememberMe: 'false']
+		body: [timeOffset: '240', UserName: "${settings.username}", Password: "${settings.password}", RememberMe: 'false'],
+		timeout: 15
 	]
-	
-	// log.debug "Params: $params.headers $params.body"
-	device.data.cookiess = ''
-	
-	try {
-	    httpPost(params) { 
-	        response ->
-	        if (debugOutput) log.debug "Request was successful, $response.status" // ${response.getHeaders()}"
-	        String allCookies = ""
-	
-	        response.getHeaders('Set-Cookie').each {
-	            String cookie = it.value.split(';|,')[0]
-	            Boolean skipCookie = false
-	            def expireParts = it.value.split('expires=')
-	
-	            try {
-	            	def cookieSegments = it.value.split(';')
-	            	for (int i = 0; i < cookieSegments.length; i++) {
-	            		def cookieSegment = cookieSegments[i]
-	            		String cookieSegmentName = cookieSegment.split('=')[0]
-			
-	            		if (cookieSegmentName.trim() == "expires") {
-	            			String expiration = cookieSegment.split('=')[1]
-				
-	            			Date expires = new Date(expiration)
-	            			Date newDate = new Date() // right now
-				
-	            			if (expires < newDate) {
-	            			    skipCookie = true
-	            			}
-				
-	            		}
-	            	}
-	            } catch (e) {
-	                if (debugOutput) log.debug "!error when checking expiration date: $e ($expiration) [$expireParts.length] {$it.value}"
-	            }
-	
-	            allCookies += it.value + ';'
-	
-	            if (cookie != ".ASPXAUTH_TH_A=") {
-	                if (it.value.split('=')[1].trim() != "") {
-	                    if (!skipCookie) {
-	                        if (debugOutput) log.debug "Adding cookie to collection: $cookie"
-	                        device.data.cookiess = device.data.cookiess + cookie + ';'
-	                    }
-	                }
-	            }
-	        }
-            int cookieCount = device.data.cookiess.split(";", -1).length - 1;
-            if (cookieCount < minCookieCount) {
-			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
-			ofExit = false
-            }
-	    }
-	} catch (e) {
-		log.warn "Something went wrong during login: $e"
-		def String eStr = e.toString()
-		def pair = eStr.split(" ")
-		def p1 = pair[0]
-		def p2 = pair[1]
 
-		if ((p2 == "Unauthorized") || (p2 == "Read")) {
-			if (fromUnauth) {
-				if (debugOutput) log.debug "2nd Unauthorized failure ... giving up!"
-				getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-			}
-			else {
-				if (debugOutput) log.debug "Scheduling a retry in 5 minutes due to Unauthorized!"
-				def pData = [data:['cd':[cd.deviceNetworkId]]]
-				runIn(300, refreshFromRunin, pData)
+	List<String> cookies = []
+	List<String> cookieNames = []
+	try {
+		httpPost(params) { response ->
+			if (debugOutput) log.debug "TCC login response: ${response.status}"
+			response.getHeaders('Set-Cookie').each { header ->
+				String raw = header.value
+				String nameValue = raw.split(';', 2)[0].trim()
+				Integer equalsAt = nameValue.indexOf('=')
+				if (equalsAt < 1) return
+				String cookieName = nameValue.substring(0, equalsAt).trim()
+				String cookieValue = nameValue.substring(equalsAt + 1).trim()
+				if (!cookieValue || tccCookieExpired(raw)) return
+				cookies << nameValue
+				cookieNames << cookieName
 			}
 		}
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-		ofExit = false
+	} catch (e) {
+		log.warn "${cd.displayName}: TCC login failed: ${e.message ?: e}"
+		return null
 	}
-	return ofExit
-}	
+
+	Integer cookieCount = cookies.size()
+	Boolean authCookieSeen = cookieNames.any { it.startsWith('.ASPXAUTH') }
+	if (debugOutput) log.debug "TCC login returned ${cookieCount} usable cookies; names: ${cookieNames}; auth cookie present: ${authCookieSeen}"
+	if (cookieCount < minCookieCount) {
+		if (debugOutput) log.debug "TCC login candidate rejected: expected at least ${minCookieCount} cookies"
+		return null
+	}
+	return [cookies:cookies.join(';') + ';', cookieCount:cookieCount, authCookieSeen:authCookieSeen]
+}
+
+private Boolean tccCookieExpired(String raw) {
+	String expires = raw.split(';').find { it.trim().toLowerCase().startsWith('expires=') }
+	if (!expires) return false
+	String value = expires.substring(expires.indexOf('=') + 1).trim()
+	try {
+		return new Date(value) < new Date()
+	} catch (e) {
+		if (debugOutput) log.debug "TCC cookie expiry could not be parsed; treating its lifetime as unknown"
+		return false
+	}
+}
 
 // Value setting Section
 //
@@ -894,17 +990,32 @@ def deviceSettingInitDB(cd, val) { 	 // reset all params, then set individually
 }
 // end of section
 
+private void clearSentDeviceSettings(cd, Map sent) {
+	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+	Map current = state.deviceSetting."${dniParts[2]}"
+	if (!current) return
+	sent.each { String name, value ->
+		if (name in ["DeviceID", "DisplayUnits"]) return
+		if (current[name] == value) current[name] = null
+	}
+}
+
 
 float ensureRange(float value, float min, float max) {
    return Math.min(Math.max(value, min), max)
 }
 
-def refreshFromRunin(data)
-{ 
-	def cdd = data["cd"]
+private void scheduleRefreshRetry(cd, Integer delay, Boolean fromUnauth) {
+	runIn(delay, "refreshFromRunin", [overwrite:false, data:[dni:cd.deviceNetworkId, fromUnauth:fromUnauth]])
+}
+
+def refreshFromRunin(data) {
+	def cdd = data?.dni ?: data?.cd
+	if (cdd instanceof List) cdd = cdd[0]
 	def cd = getChildDevice(cdd)
-	if (debugOutput) log.debug "Calling refresh after Unauthorize failure!"
-	componentDoRefresh(cd, true)
+	if (!cd) return
+	if (debugOutput) log.debug "Calling refresh after TCC failure for ${cd.displayName}"
+	componentDoRefresh(cd, data?.fromUnauth == true)
 }
 
 
