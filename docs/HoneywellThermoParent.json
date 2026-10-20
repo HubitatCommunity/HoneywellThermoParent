@@ -4,7 +4,7 @@
         "version": "2.0.19",
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
-        "dateReleased": "2024-03-18",
+        "dateReleased": "2026-10-20",
         "releaseNotes": "v2.0.19  Retain one Parent-owned TCC session across child refreshes and commands\nv2.0.18  Added preference for EmergencyHeat to use either 0 or 4 to support more thermostat models\n         isEmergencyHeatAllowed added to state. per bdunbar analysis",
         "tags": "Tools & Utilities",
         "drivers": [{
