@@ -13,7 +13,10 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
- * 
+ *
+ * csteele: v2.0.9   Send Child preferences to the Parent before the first refresh. 
+ *                   Parse poll intervals safely, disable recurring polling cleanly when Off, and spread thermostat schedules across the minute. 
+ *                   Suppress null description logs, declare hysteresis, and make preference/local types consistent.
  * csteele: v2.0.8   added emergencyHeatCommand value to support more thermostat models
  * csteele: v2.0.7   changed schedule(refresh) to be NOT the 00 second
  * csteele: v2.0.6   Added a hint for Device ID parameter
@@ -34,7 +37,7 @@
  *                    added fanOperatingState Attribute.
 **/
 
- public static String version()     {  return "v2.0.8"  }
+ public static String version()     {  return "v2.0.9"  }
 
 
 metadata {
@@ -52,6 +55,7 @@ metadata {
         attribute  "lastUpdate",         "string"
         attribute  "followSchedule",     "string"
         attribute  "fanOperatingState",  "string"
+        attribute  "hysteresis",         "number"
         
         attribute "humidifierStatus", "string"
         attribute "humidifierSetPoint", "number"
@@ -88,7 +92,7 @@ metadata {
        input name: "enableHumidity", type: "enum", title: "Do you have the optional Humidity sensor and want to enable it?", options: ["Yes", "No"], required: false, defaultValue: "No"
        input name: "setPermHold", type: "enum", title: "Will Setpoints be temporary or permanent?", options: ["Temporary", "Permanent"], required: false, defaultValue: "Temporary"
        input name: "pollIntervals", type: "enum", title: "Set the Poll Interval.", options: [0:"off", 60:"1 minute", 120:"2 minutes", 180:"3 minutes", 300:"5 minutes",600:"10 minutes",900:"15 minutes",1800:"30 minutes",3600:"60 minutes"], required: true, defaultValue: "600"
-       input name: "emergencyHeatCommand", type: "enum", title: "Set the Emergency Heat Command Value.", options: [0:"Zero", 4:"Four"], required: true, defaultValue: 4
+       input name: "emergencyHeatCommand", type: "enum", title: "Set the Emergency Heat Command Value.", options: [0:"Zero", 4:"Four"], required: true, defaultValue: "4"
        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
 }
@@ -96,35 +100,50 @@ metadata {
 void updated() {
 	log.info "Updated ${this.device} ($device.deviceNetworkId)"
 	log.warn "description logging is: ${txtEnable == true}"
-	runInMillis( 200, parentUpdate)
-	runInMillis( 400, poll)
-
+	parentUpdate()
+	poll()
 }
 
 void parentUpdate() {
-	if (setPermHold == "Permanent") { PermHoldCode = 2 } else { PermHoldCode = 1 }
+	Integer permHoldCode = setPermHold == "Permanent" ? 2 : 1
 	String cd = device.deviceNetworkId
-	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, PermHoldCode, pollIntervals, emergencyHeatCommand)
+	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, permHoldCode, pollIntervals, emergencyHeatCommand)
 }
 
 
 void poll() {
-	if (txtEnable) log.info "received Poll request from ${this.displayName ?: (this.device.label ?: this.device.name)} (Poll Interval: ${pollIntervals.toInteger()/60} mins)"
-	unschedule(refresh) // maybe poll interval is now zero
+	Integer seconds = configuredPollIntervalSeconds()
+	String intervalDescription = seconds > 0 ? "${seconds / 60} mins" : "off"
+	if (txtEnable) log.info "received Poll request from ${this.displayName ?: (this.device.label ?: this.device.name)} (Poll Interval: $intervalDescription)"
+	unschedule("refresh") // maybe poll interval is now zero
 	// build out a cron string for pollInterval options 1 min -- 60 min
-	if (pollIntervals > "0") { 
+	if (seconds > 0) {
 	    def boutNow = new Date(new Date().time)
-	    Integer pIminute = pollIntervals.toInteger() / 60 // find minutes
+	    Integer pIminute = seconds / 60 // find minutes
 	    Integer pIhour = pIminute / 60 // find hours
 
 	    String pIntMinute = (pIminute == 60 || pIminute == 0) ? "${boutNow.minutes}" : "${boutNow.minutes % pIminute}/$pIminute"
 	    String pIntHour = (pIhour < 1) ? "*" : "*/$pIhour"
 
-	    schedule("11 $pIntMinute $pIntHour ? * *", refresh) 
+	    // A raw String hash changes by one for sequential child suffixes, so mix it
+	    // by a value coprime to 50 before mapping children into the 50-second window.
+	    Integer mixedDniHash = device.deviceNetworkId.hashCode() * 17
+	    Integer pollSecond = 5 + ((mixedDniHash & 0x7fffffff) % 50)
+	    schedule("$pollSecond $pIntMinute $pIntHour ? * *", "refresh")
 	}
 
 	// clicking Poll means do at least one refresh, even if there's no poll interval
 	refresh()
+}
+
+private Integer configuredPollIntervalSeconds() {
+	if (pollIntervals == null || pollIntervals.toString().trim() == "") return 0
+	try {
+		Integer seconds = pollIntervals.toString().toInteger()
+		if (seconds in [0, 60, 120, 180, 300, 600, 900, 1800, 3600]) return seconds
+	} catch (ignored) { }
+	log.warn "Invalid Poll Interval '${pollIntervals}'; recurring polling is disabled."
+	return 0
 }
 
 void installed() {
@@ -137,11 +156,10 @@ void parse(String description) { log.warn "parse(String description) not impleme
 
 void parse(List description) {
 	description.each {
-            if (txtEnable) log.info it.descriptionText
-            sendEvent(it)
+		if (txtEnable && it.descriptionText) log.info it.descriptionText
+		sendEvent(it)
     }
 }
-
 
 void caution_deleteThisThermostat() {
     parent?.componentDeleteThermostatChild(this.device)
