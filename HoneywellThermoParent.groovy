@@ -2,7 +2,7 @@
  * IMPORT URL: https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy
  *
  *  Total Comfort API
- * 
+ *
  *  Based on Code by Eric Thomas, Edited by Bob Jase, and C Steele
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
@@ -16,6 +16,11 @@
  *
  *
  *
+ * csteele: v2.0.21  Discover and initialize thermostat children without clearing existing state.
+ *                    Derive collision-free child numbers and delete only the selected thermostat,
+ *                    its exact outdoor children, and its own Parent state entries. Give newly
+ *                    created component children unambiguous numbered names without duplicating
+ *                    "Thermostat" when it is already present in the Parent display name.
  * csteele: v2.0.20  Store thermostat setpoint limits and Emergency Heat capability per child so
  *                    one thermostat's status cannot affect commands sent to another thermostat.
  *                    Commands tolerate capabilities being unknown until that child is refreshed.
@@ -89,7 +94,7 @@ import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 
- public static String version()	{  return "v2.0.20"  }
+ public static String version()	{  return "v2.0.21"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -148,38 +153,44 @@ void parse(String description) {
 
 void installed() { initialize() }
 void initialize(){
-	def cd = getChildDevices()?.findAll { it.deviceNetworkId > "${device.id}-${type()}"}
-	cd = getChildDevice("${device.id}-${type}_0") // gets list of children
-	if (!cd) {
-		state.childParamMap = [:]
-		state.deviceSetting = [:]
-		state.childStatus = [:]
-		cd = createChild("0")
-		state.nextChild = "1"
+	ensureStateMaps()
+	List thermostats = thermostatChildren()
+	if (!thermostats) {
+		createChild("0")
+		thermostats = thermostatChildren()
 	}
-	if (state.childStatus == null) state.childStatus = [:]
+	thermostats.each { cd -> ensureChildMaps(childKey(cd)) }
+	state.nextChild = nextAvailableChildNumber()
+	if (debugOutput) log.debug "Initialized thermostat children: ${thermostats*.deviceNetworkId}; next child: ${state.nextChild}"
 }
 
 void addThermostat() {
-	createChild(state.nextChild)
-	state.nextChild = "${nxtC = state.nextChild.toInteger() +1}" // numerically increment a string number
-	//log.debug "addThermostat: $state.nextChild"
+	String childNumber = nextAvailableChildNumber()
+	createChild(childNumber)
+	state.nextChild = (childNumber.toInteger() + 1).toString()
+	if (debugOutput) log.debug "Added thermostat child $childNumber; next child: ${state.nextChild}"
 }
 
 def createChild(String numChild) {
-	//log.debug "createChild: ${device.id}-${type()}_$numChild, $cd"
-	state.childParamMap << [ "$numChild": [childDNI: null, honeywelldevice: null, haveHumidifier: null, enableOutdoorTemps: null, enableHumidity: null, setPermHold: null, pollIntervals: null, emergencyHeatCommand: null]]
-	if (state.childStatus == null) state.childStatus = [:]
-	state.childStatus[numChild.toString()] = [isEmergencyHeatAllowed: null, heatLowerSetptLimit: null, heatUpperSetptLimit: null, coolLowerSetptLimit: null, coolUpperSetptLimit: null]
-	def cd = addChildDevice("csteele", "Honeywell WiFi ${type()} Component", "${device.id}-${type()}_$numChild", [name: "${device.displayName} ${type()}", isComponent: true])
-	state.deviceSetting << [ "$numChild": [SystemSwitch: null, StatusHeat: null, StatusCool: null, HeatSetpoint: null, CoolSetpoint: null, HeatNextPeriod: null, CoolNextPeriod: null, FanMode: null, TemporaryHoldUntilTime: null, VacationHold: null]]
-	return cd 
+	String childNumber = numChild.toString()
+	String dni = "${device.id}-${type()}_${childNumber}"
+	def existing = getChildDevice(dni)
+	if (existing) {
+		ensureChildMaps(childNumber)
+		log.warn "Thermostat child $dni already exists; returning the existing child."
+		return existing
+	}
+	ensureChildMaps(childNumber)
+	String childBaseName = thermostatChildBaseName()
+	String childName = "${childBaseName} ${childNumber}"
+	return addChildDevice("csteele", "Honeywell WiFi ${type()} Component", dni, [name: childName, label: childName, isComponent: true])
 }
 
 def createOutdoorChild(cd, oType) {
-	cd = addChildDevice("hubitat", "Generic Component $oType Sensor", "${cd.id}-$oType", [name: "Outdoor $oType", isComponent: true])
-	//log.debug "createOutdoorChild: $cd.deviceNetworkId, $cd.displayName"
-	return cd
+	String dni = "${cd.id}-${oType}"
+	def existing = getChildDevice(dni)
+	if (existing) return existing
+	return addChildDevice("hubitat", "Generic Component $oType Sensor", dni, [name: "Outdoor $oType", isComponent: true])
 }
 
 
@@ -213,30 +224,29 @@ void componentDoRefresh(cd, Boolean fromUnauth = false) {
 	getStatus(cd, fromUnauth, session)
 }
 
-void componentDeleteThermostatChild(id) { 
-	//log.info "delete Thermostat Child button pushed. $id.deviceNetworkId, $id.id"
-    def cdd = getChildDevices()?.findAll { it.deviceNetworkId > id.id}
-    cdd.each { 
-		dniParts = it.deviceNetworkId.split("[-_]") 
-        if ( dniParts.size() == 2 && dniParts[0] == id.id ) { deleteChildDevice(it.deviceNetworkId) }
-    }
-	cdd = getChildDevice(id.deviceNetworkId)
-	cdd.each { 
-       dniParts = it.deviceNetworkId.split("[-_]")
-       deleteChildDevice(it.deviceNetworkId)
-    } // delete only those Outdoor devices and those with the same id as the child specificly clicked
-	String[] dniParts = id.deviceNetworkId.split("[-_]") 
-	state.deviceSetting = state.deviceSetting.findAll { it.key != dniParts[2] }
-	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
-	state.childStatus = (state.childStatus ?: [:]).findAll { it.key != dniParts[2] }
+void componentDeleteThermostatChild(cd) {
+	String childNumber
+	String thermostatDni = cd?.deviceNetworkId?.toString()
+	try {
+		childNumber = childKey(cd)
+	} catch (e) {
+		log.warn "Refusing to delete a device that is not one of this Parent's thermostat children: ${thermostatDni}"
+		return
+	}
+	componentDeleteOutdoorChild(cd.id)
+	deleteChildDevice(thermostatDni)
+	state.deviceSetting = (state.deviceSetting ?: [:]).findAll { it.key.toString() != childNumber }
+	state.childParamMap = (state.childParamMap ?: [:]).findAll { it.key.toString() != childNumber }
+	state.childStatus = (state.childStatus ?: [:]).findAll { it.key.toString() != childNumber }
+	state.nextChild = nextAvailableChildNumber()
+	if (debugOutput) log.debug "Deleted thermostat child ${thermostatDni} and its exact state entries; next child: ${state.nextChild}"
 }
 
 void componentDeleteOutdoorChild(id) {
-	def cdd = getChildDevices()?.findAll { it.deviceNetworkId > "$id-"}
-	cdd.each { 
-		String[] dniParts = it.deviceNetworkId.split("[-_]")
-		// delete only those Outdoor devices and those with the same id as the child specificly clicked
-		if ( dniParts.size() == 2 && dniParts[0] == id ) { deleteChildDevice(it.deviceNetworkId) }
+	String childDeviceId = (id instanceof Number || id instanceof CharSequence) ? id.toString() : id.id.toString()
+	["Humidity", "Temperature"].each { String sensorType ->
+		String dni = "${childDeviceId}-${sensorType}"
+		if (getChildDevice(dni)) deleteChildDevice(dni)
 	}
 }
 
@@ -564,7 +574,6 @@ def getStatusDistrib(cd, Map decodedResult) {
 	state.childStatus[childNumber] = thermostatStatus
 	removeLegacyGlobalCapabilities()
 
-
 	String[] dniParts = cd.deviceNetworkId.split("[-_]") // which child 'owns this'?
 	
 	if (holdTime != 0) { getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"TemporaryHold", descriptionText:"${cd.displayName} was Set to Temporary Hold"]]) }
@@ -699,7 +708,6 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p21 = pair2[1]
 	    		def p22 = pair2[2]
 		
-		
 	    		HumLevel = p21.toInteger()
 	    		HumMin = p20.toInteger()
 		
@@ -707,7 +715,6 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p30 = pair3[0]
 		
 	    		HumMax = p30.toInteger() 
-		
 		}
 	}
         
@@ -816,27 +823,6 @@ void settingsAccumWait(data) {
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 		}
 	}
-
-/*
-	def pData = [cd:[cd]]
-	if (debugOutput) log.debug "setStatus request: ${params.uri}"
-	asynchttpPost("setStatusHandler", params, pData)
-}
-
-
-def setStatusHandler(resp, data) {
-	def cdd = data.cd
-	def cd = getChildDevice(cdd.deviceNetworkId)
-	if(resp.getStatus() == 200 || resp.getStatus() == 207 || resp.getStatus() == 408) {
-		if (debugOutput) log.debug "Request was successful, $resp.status"
-		device.data.SetStatus = 1
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
-	} else {
-		if (descTextEnable) log.info "TCC setStatus failed"
-		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
-	}
-*/
-
 
 	// Clear only the values in the successful snapshot. Commands that arrived while
 	// the POST was in progress remain pending for their own scheduled send.
@@ -992,17 +978,18 @@ private Boolean tccCookieExpired(String raw) {
 //
 // params passed in from each Child: DNI, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, setPermHold, pollIntervals, emergencyHeatCommand
 void setParams(cDNI, dev, hH, eOT, eH, sPH, pI, eHC) {
-	String[] dniParts = cDNI.split("[-_]")
-	state.childParamMap."${dniParts[2]}".childDNI 			= cDNI
-	state.childParamMap."${dniParts[2]}".honeywelldevice 		= dev
-	state.childParamMap."${dniParts[2]}".haveHumidifier 		= hH
-	state.childParamMap."${dniParts[2]}".enableOutdoorTemps 	= eOT
-	state.childParamMap."${dniParts[2]}".enableHumidity		= eH
-	state.childParamMap."${dniParts[2]}".setPermHold 		= sPH
-	state.childParamMap."${dniParts[2]}".pollIntervals 		= pI
-	state.childParamMap."${dniParts[2]}".emergencyHeatCommand 	= eHC
+	String childNumber = childKeyFromDni(cDNI)
+	ensureChildMaps(childNumber)
+	state.childParamMap[childNumber].childDNI 			= cDNI
+	state.childParamMap[childNumber].honeywelldevice 		= dev
+	state.childParamMap[childNumber].haveHumidifier 		= hH
+	state.childParamMap[childNumber].enableOutdoorTemps 	= eOT
+	state.childParamMap[childNumber].enableHumidity		= eH
+	state.childParamMap[childNumber].setPermHold 		= sPH
+	state.childParamMap[childNumber].pollIntervals 		= pI
+	state.childParamMap[childNumber].emergencyHeatCommand 	= eHC
 
-	if (debugOutput) log.debug "ChildParams: $cDNI, $dev, $hH, $eOT, $eH, $sPH, $pI, $eHC, -${state.childParamMap."${dniParts[2]}".honeywelldevice}-"
+	if (debugOutput) log.debug "ChildParams: $cDNI, $dev, $hH, $eOT, $eH, $sPH, $pI, $eHC, -${state.childParamMap[childNumber].honeywelldevice}-"
 }
 
 // initialize the device values. Each method overwrites it's specific value
@@ -1037,16 +1024,81 @@ private void clearSentDeviceSettings(cd, Map sent) {
 }
 
 
+private String thermostatPrefix() {
+	return "${device.id}-${type()}_"
+}
+
+private String thermostatChildBaseName() {
+	String parentName = device.displayName?.toString()?.trim() ?: "Honeywell"
+	String childType = type()
+	parentName = parentName.replaceFirst(/(?i)\s+Parent$/, "").trim()
+	if (!parentName) parentName = "Honeywell"
+	return parentName.toLowerCase().endsWith(childType.toLowerCase()) ? parentName : "${parentName} ${childType}"
+}
+
+private List thermostatChildren() {
+	String prefix = thermostatPrefix()
+	return getChildDevices()?.findAll { it.deviceNetworkId?.startsWith(prefix) } ?: []
+}
+
+private void ensureStateMaps() {
+	if (state.childParamMap == null) state.childParamMap = [:]
+	if (state.deviceSetting == null) state.deviceSetting = [:]
+	if (state.childStatus == null) state.childStatus = [:]
+}
+
+private void ensureChildMaps(String childNumber) {
+	ensureStateMaps()
+	if (state.childParamMap[childNumber] == null) {
+		state.childParamMap[childNumber] = [childDNI: null, honeywelldevice: null, haveHumidifier: null, enableOutdoorTemps: null, enableHumidity: null, setPermHold: null, pollIntervals: null, emergencyHeatCommand: null]
+	}
+	if (state.deviceSetting[childNumber] == null) {
+		state.deviceSetting[childNumber] = [SystemSwitch: null, StatusHeat: null, StatusCool: null, HeatSetpoint: null, CoolSetpoint: null, HeatNextPeriod: null, CoolNextPeriod: null, FanMode: null, TemporaryHoldUntilTime: null, VacationHold: null]
+	}
+	if (state.childStatus[childNumber] == null) {
+		state.childStatus[childNumber] = [isEmergencyHeatAllowed: null, heatLowerSetptLimit: null, heatUpperSetptLimit: null, coolLowerSetptLimit: null, coolUpperSetptLimit: null]
+	}
+}
+
+private Integer nonNegativeInteger(value) {
+	if (value == null) return null
+	try {
+		Integer parsed = value.toString().toInteger()
+		return parsed >= 0 ? parsed : null
+	} catch (ignored) {
+		return null
+	}
+}
+
+private String nextAvailableChildNumber() {
+	Set<Integer> used = [] as Set
+	thermostatChildren().each { cd ->
+		Integer childNumber = nonNegativeInteger(childKey(cd))
+		if (childNumber != null) used << childNumber
+	}
+	Integer minimum = used ? used.max() + 1 : 0
+	Integer saved = nonNegativeInteger(state.nextChild)
+	Integer candidate = saved == null ? minimum : Math.max(saved, minimum)
+	while (getChildDevice("${thermostatPrefix()}${candidate}")) candidate++
+	return candidate.toString()
+}
+
 private String childKey(cd) {
-	return cd.deviceNetworkId.split("[-_]")[2]
+	return childKeyFromDni(cd?.deviceNetworkId)
+}
+
+private String childKeyFromDni(value) {
+	String dni = value?.toString()
+	String prefix = thermostatPrefix()
+	if (!dni?.startsWith(prefix) || dni.length() <= prefix.length()) {
+		throw new IllegalArgumentException("Device ${dni} is not a thermostat child of ${device.id}")
+	}
+	return dni.substring(prefix.length())
 }
 
 private Map childStatus(cd) {
 	String key = childKey(cd)
-	if (state.childStatus == null) state.childStatus = [:]
-	if (state.childStatus[key] == null) {
-		state.childStatus[key] = [isEmergencyHeatAllowed: null, heatLowerSetptLimit: null, heatUpperSetptLimit: null, coolLowerSetptLimit: null, coolUpperSetptLimit: null]
-	}
+	ensureChildMaps(key)
 	return state.childStatus[key]
 }
 
