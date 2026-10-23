@@ -5,7 +5,7 @@
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
         "dateReleased": "2026-10-23",
-        "releaseNotes": "v2.0.21  Discover and initialize thermostat children without clearing existing state.\n     Derive collision-free child numbers and delete only the selected thermostat, its exact outdoor children, and its own Parent state entries.\n     Give newly created component children unambiguous numbered names without duplicating "Thermostat" when it is already present in the Parent display name.\nv2.0.20  Store thermostat setpoint limits and Emergency Heat capability per child so one thermostat's status cannot affect commands sent to another thermostat.\n     Commands tolerate capabilities being unknown until that child is refreshed.\nv2.0.19  Retain one Parent-owned TCC session across child refreshes and commands,
+        "releaseNotes": "v2.0.21  Discover and initialize thermostat children without clearing existing state.\n     Derive collision-free child numbers and delete only the selected thermostat, its exact outdoor children, and its own Parent state entries.\n     Give newly created component children unambiguous numbered names without duplicating 'Thermostat' when it is already present in the Parent display name.\nv2.0.20  Store thermostat setpoint limits and Emergency Heat capability per child so one thermostat's status cannot affect commands sent to another thermostat.\n     Commands tolerate capabilities being unknown until that child is refreshed.\nv2.0.19  Retain one Parent-owned TCC session across child refreshes and commands.",
         "tags": "Tools & Utilities",
         "drivers": [{
                 "id": "f991de80-143f-49c8-a127-7996e972ed58",
