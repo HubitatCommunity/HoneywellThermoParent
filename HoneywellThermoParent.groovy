@@ -2,7 +2,7 @@
  * IMPORT URL: https://raw.githubusercontent.com/HubitatCommunity/HoneywellThermoParent/main/HoneywellThermoParent.groovy
  *
  *  Total Comfort API
- *   
+ * 
  *  Based on Code by Eric Thomas, Edited by Bob Jase, and C Steele
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
@@ -16,6 +16,9 @@
  *
  *
  *
+ * csteele: v2.0.20  Store thermostat setpoint limits and Emergency Heat capability per child so
+ *                    one thermostat's status cannot affect commands sent to another thermostat.
+ *                    Commands tolerate capabilities being unknown until that child is refreshed.
  * csteele: v2.0.19  Retain one Parent-owned TCC session across child refreshes and commands to reduce
  *                    unnecessary logins and Honeywell rate-limit pressure. Cookie count remains an
  *                    empirical confidence check; valid thermostat data confirms the session. Login
@@ -46,12 +49,12 @@
  * csteele: v2.0.7   corrected "nextChild" to correctly increment as a number, not asci increment
  *                    used the same split("[-_]") string to prevent future typos
  * csteele: v2.0.6   added Delete Outdoor Child and Delete Thermostat
- *                    fixed cron string to run the whole hour (x mod y / y) 
+ *                    fixed cron string to run the whole hour (x mod y / y)
  * csteele: v2.0.5   login returns true/false allowing refresh to retry login
  * csteele: v2.0.4   refactored "getStatus" and "getHumidityStatus" to minimize try/catch scope
  *                    reorganized methods to clump Fan methods together, to clump Mode methods together, etc.
  *                    "getHumidityStatus" using asynchttpGet
- *                    refactored all the set heat/cool/up/down 
+ *                    refactored all the set heat/cool/up/down
  * csteele: v2.0.3   refactored "setStatus" to accumulate UI button clicks
  *                    clarified some status/log messages
  *                    added both Outdoor Child devices
@@ -70,7 +73,8 @@
 		everything to the parent. There the UI is processed and an Event is sent back to the child to be displayed on 
 		the child's Current States column. Each Child driver has a unique id that it passes to the parent (cd) to keep each 
 		child action separate from other child devices. 
-		The child device specific data is kept in two Maps: state.deviceSetting & state.childParamMap
+		The child device specific data is kept in three Maps: state.deviceSetting, state.childParamMap,
+		and state.childStatus.
 
 		This parent driver is organized into the three major categories of actions. 
 			UI methods, all beginning with "component" 
@@ -85,7 +89,7 @@ import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 
- public static String version()	{  return "v2.0.19"  }
+ public static String version()	{  return "v2.0.20"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -129,7 +133,6 @@ metadata {
 
 
 
-
 void updated(){
 	log.info "updated..."
 	log.warn "debug logging is: ${debugOutput == true}"
@@ -150,9 +153,11 @@ void initialize(){
 	if (!cd) {
 		state.childParamMap = [:]
 		state.deviceSetting = [:]
+		state.childStatus = [:]
 		cd = createChild("0")
 		state.nextChild = "1"
 	}
+	if (state.childStatus == null) state.childStatus = [:]
 }
 
 void addThermostat() {
@@ -164,6 +169,8 @@ void addThermostat() {
 def createChild(String numChild) {
 	//log.debug "createChild: ${device.id}-${type()}_$numChild, $cd"
 	state.childParamMap << [ "$numChild": [childDNI: null, honeywelldevice: null, haveHumidifier: null, enableOutdoorTemps: null, enableHumidity: null, setPermHold: null, pollIntervals: null, emergencyHeatCommand: null]]
+	if (state.childStatus == null) state.childStatus = [:]
+	state.childStatus[numChild.toString()] = [isEmergencyHeatAllowed: null, heatLowerSetptLimit: null, heatUpperSetptLimit: null, coolLowerSetptLimit: null, coolUpperSetptLimit: null]
 	def cd = addChildDevice("csteele", "Honeywell WiFi ${type()} Component", "${device.id}-${type()}_$numChild", [name: "${device.displayName} ${type()}", isComponent: true])
 	state.deviceSetting << [ "$numChild": [SystemSwitch: null, StatusHeat: null, StatusCool: null, HeatSetpoint: null, CoolSetpoint: null, HeatNextPeriod: null, CoolNextPeriod: null, FanMode: null, TemporaryHoldUntilTime: null, VacationHold: null]]
 	return cd 
@@ -221,6 +228,7 @@ void componentDeleteThermostatChild(id) {
 	String[] dniParts = id.deviceNetworkId.split("[-_]") 
 	state.deviceSetting = state.deviceSetting.findAll { it.key != dniParts[2] }
 	state.childParamMap = state.childParamMap.findAll { it.key != dniParts[2] }
+	state.childStatus = (state.childStatus ?: [:]).findAll { it.key != dniParts[2] }
 }
 
 void componentDeleteOutdoorChild(id) {
@@ -277,9 +285,14 @@ void componentHeat(cd) {
 
 void componentEmergencyHeat(cd) {
 	if (descTextEnable) log.info "received Emergency Heat request from ${cd.displayName}"
-	if (state.isEmergencyHeatAllowed) {
+	Boolean allowed = emergencyHeatAllowed(cd)
+	if (allowed == true) {
 		if (debugOutput) log.debug "Set Emergency/Auxiliary Heat On"
 		setThermostatMode(cd, 'emergency heat')
+	} else if (allowed == null) {
+		log.warn "${cd.displayName}: Emergency Heat capability is not known yet. Refresh this thermostat and try again."
+	} else {
+		log.warn "${cd.displayName}: this thermostat reports that Emergency Heat is not allowed."
 	}
 }
 
@@ -311,7 +324,7 @@ void componentSetThermostatMode(cd, mode) {
 void componentSetCoolingSetpoint(cd, val) {
 	if (descTextEnable) log.info "received Cooling Setpoint request from ${cd.displayName}: $val"
 	float valIn = val // for limits check
-	val = ensureRange( val.toFloat(), state.coolLowerSetptLimit.toFloat(), state.coolUpperSetptLimit.toFloat() )
+	val = limitSetpoint(cd, val, "cool")
 	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
 	deviceSettingInitDB(cd, state.childParamMap."${dniParts[2]}".setPermHold) 	 // reset all params, then set individually
@@ -324,7 +337,7 @@ void componentSetCoolingSetpoint(cd, val) {
 void componentSetHeatingSetpoint(cd, val) {
 	if (descTextEnable) log.info "received Heating Setpoint request from ${cd.displayName}: $val"
 	float valIn = val // for limits check
-	val = ensureRange( val.toFloat(), state.heatLowerSetptLimit.toFloat(), state.heatUpperSetptLimit.toFloat() )
+	val = limitSetpoint(cd, val, "heat")
 	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
 	deviceSettingInitDB(cd, state.childParamMap."${dniParts[2]}".setPermHold) 	 // reset all params, then set individually
@@ -541,14 +554,18 @@ def getStatusDistrib(cd, Map decodedResult) {
 	def holdTime = decodedResult.latestData.uiData.TemporaryHoldUntilTime
 	def vacationHoldMode = decodedResult.latestData.uiData.IsInVacationHoldMode
 	def vacationHold = decodedResult.latestData.uiData.VacationHold
-	state.isEmergencyHeatAllowed = decodedResult.latestData.uiData.SwitchEmergencyHeatAllowed
+	String childNumber = childKey(cd)
+	Map thermostatStatus = childStatus(cd)
+	thermostatStatus.isEmergencyHeatAllowed = decodedResult.latestData.uiData.SwitchEmergencyHeatAllowed
+	thermostatStatus.heatLowerSetptLimit = decodedResult.latestData.uiData.HeatLowerSetptLimit
+	thermostatStatus.heatUpperSetptLimit = decodedResult.latestData.uiData.HeatUpperSetptLimit
+	thermostatStatus.coolLowerSetptLimit = decodedResult.latestData.uiData.CoolLowerSetptLimit
+	thermostatStatus.coolUpperSetptLimit = decodedResult.latestData.uiData.CoolUpperSetptLimit
+	state.childStatus[childNumber] = thermostatStatus
+	removeLegacyGlobalCapabilities()
 
 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]") // which child 'owns this'?
-	state.heatLowerSetptLimit = decodedResult.latestData.uiData.HeatLowerSetptLimit 
-	state.heatUpperSetptLimit = decodedResult.latestData.uiData.HeatUpperSetptLimit 
-	state.coolLowerSetptLimit = decodedResult.latestData.uiData.CoolLowerSetptLimit 
-	state.coolUpperSetptLimit = decodedResult.latestData.uiData.CoolUpperSetptLimit 
 	
 	if (holdTime != 0) { getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"TemporaryHold", descriptionText:"${cd.displayName} was Set to Temporary Hold"]]) }
 	if (vacationHoldMode == true) { getChildDevice(cd.deviceNetworkId).parse([[name:"followSchedule", value:"VacationHold", descriptionText:"${cd.displayName} was Set to Vacation Hold"]]) }
@@ -800,6 +817,25 @@ void settingsAccumWait(data) {
 		}
 	}
 
+/*
+	def pData = [cd:[cd]]
+	if (debugOutput) log.debug "setStatus request: ${params.uri}"
+	asynchttpPost("setStatusHandler", params, pData)
+}
+
+
+def setStatusHandler(resp, data) {
+	def cdd = data.cd
+	def cd = getChildDevice(cdd.deviceNetworkId)
+	if(resp.getStatus() == 200 || resp.getStatus() == 207 || resp.getStatus() == 408) {
+		if (debugOutput) log.debug "Request was successful, $resp.status"
+		device.data.SetStatus = 1
+		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
+	} else {
+		if (descTextEnable) log.info "TCC setStatus failed"
+		getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+	}
+*/
 
 
 	// Clear only the values in the successful snapshot. Commands that arrived while
@@ -1001,8 +1037,54 @@ private void clearSentDeviceSettings(cd, Map sent) {
 }
 
 
-float ensureRange(float value, float min, float max) {
-   return Math.min(Math.max(value, min), max)
+private String childKey(cd) {
+	return cd.deviceNetworkId.split("[-_]")[2]
+}
+
+private Map childStatus(cd) {
+	String key = childKey(cd)
+	if (state.childStatus == null) state.childStatus = [:]
+	if (state.childStatus[key] == null) {
+		state.childStatus[key] = [isEmergencyHeatAllowed: null, heatLowerSetptLimit: null, heatUpperSetptLimit: null, coolLowerSetptLimit: null, coolUpperSetptLimit: null]
+	}
+	return state.childStatus[key]
+}
+
+private Boolean emergencyHeatAllowed(cd) {
+	def allowed = childStatus(cd).isEmergencyHeatAllowed
+	return allowed == null ? null : allowed == true
+}
+
+private Float limitSetpoint(cd, val, String which) {
+	Float requested = val.toFloat()
+	Map thermostatStatus = childStatus(cd)
+	String lowerName = which == "heat" ? "heatLowerSetptLimit" : "coolLowerSetptLimit"
+	String upperName = which == "heat" ? "heatUpperSetptLimit" : "coolUpperSetptLimit"
+	Float lower = toFloatOrNull(thermostatStatus[lowerName])
+	Float upper = toFloatOrNull(thermostatStatus[upperName])
+	Float limited = requested
+	if (lower != null) limited = Math.max(limited, lower)
+	if (upper != null) limited = Math.min(limited, upper)
+	if (lower == null || upper == null) {
+		String setpointName = which == "heat" ? "heating" : "cooling"
+		log.warn "${cd.displayName}: ${setpointName} setpoint limits are not known yet; refresh this thermostat to enable local range limiting."
+	}
+	return limited
+}
+
+private Float toFloatOrNull(value) {
+	if (value == null) return null
+	try {
+		return value.toString().toFloat()
+	} catch (ignored) {
+		return null
+	}
+}
+
+private void removeLegacyGlobalCapabilities() {
+	["isEmergencyHeatAllowed", "heatLowerSetptLimit", "heatUpperSetptLimit", "coolLowerSetptLimit", "coolUpperSetptLimit"].each { String name ->
+		state.remove(name)
+	}
 }
 
 private void scheduleRefreshRetry(cd, Integer delay, Boolean fromUnauth) {
