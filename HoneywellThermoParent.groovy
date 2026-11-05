@@ -16,6 +16,19 @@
  *
  *
  *
+ * csteele: v2.0.22  Retry one transient status GET or command POST after 60 seconds while retaining
+ *                    the existing TCC session. Only explicit authentication rejection can discard
+ *                    the session and trigger a login. Log caught status-response details at debug
+ *                    level so expected Honeywell timeouts do not create red error-log entries.
+ *                   Add selectable Debug logging time.
+ *                   Mask Honeywell Device IDs in driver-owned diagnostics while retaining the full
+ *                    values in preferences, Parent state, and HTTP requests.
+ *                   Isolate command accumulation, immutable in-flight delivery, bounded retries,
+ *                    retained failures, and acknowledgements per thermostat child and command ID.
+ *                   Give every child refresh a generation so newer manual or scheduled refreshes
+ *                    invalidate stale callbacks and queued retries without affecting other children.
+ *                   Correct the legacy humidifier parser's CancelMin response-line type and
+ *                    identify its setpoint, upper-limit, and lower-limit events accurately.
  * csteele: v2.0.21  Discover and initialize thermostat children without clearing existing state.
  *                    Derive collision-free child numbers and delete only the selected thermostat,
  *                    its exact outdoor children, and its own Parent state entries. Give newly
@@ -78,8 +91,8 @@
 		everything to the parent. There the UI is processed and an Event is sent back to the child to be displayed on 
 		the child's Current States column. Each Child driver has a unique id that it passes to the parent (cd) to keep each 
 		child action separate from other child devices. 
-		The child device specific data is kept in three Maps: state.deviceSetting, state.childParamMap,
-		and state.childStatus.
+		The child device specific data is kept in five Maps: state.deviceSetting, state.childParamMap,
+		state.childStatus, state.commandState, and state.refreshState.
 
 		This parent driver is organized into the three major categories of actions. 
 			UI methods, all beginning with "component" 
@@ -94,7 +107,7 @@ import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 
- public static String version()	{  return "v2.0.21"  }
+ public static String version()	{  return "v2.0.22"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
@@ -106,13 +119,21 @@ import java.util.concurrent.Semaphore
 // one TCC login. The static semaphore is coordination only; session retention does not depend
 // on static fields surviving a driver reload or hub reboot.
 @Field static ConcurrentHashMap<String, Semaphore> tccLoginLocks = new ConcurrentHashMap<String, Semaphore>()
+@Field static ConcurrentHashMap<String, Semaphore> tccCommandStateLocks = new ConcurrentHashMap<String, Semaphore>()
+@Field static ConcurrentHashMap<String, Boolean> tccActiveCommandAttempts = new ConcurrentHashMap<String, Boolean>()
 @Field static final Integer loginBackoffSeconds = 60
 @Field static final Integer loginDeferredSeconds = 2
+@Field static final Integer transientRequestRetrySeconds = 60
+@Field static final Integer maxTransientRequestRetries = 1
+@Field static final Integer maxCommandAuthenticationRetries = 1
+@Field static final Integer commandAccumulationMillis = 1600
+@Field static final Integer commandFollowupSeconds = 1
+@Field static final Integer commandStateSchemaVersion = 2
 @Field static final Integer minCookieCount = 8
 @Field static final Integer statusRequestTimeoutSeconds = 10
 
 metadata {
-	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "C Steele, Eric Thomas, lg kahn") {
+	definition (name: "Honeywell Thermo Parent", namespace: "csteele", author: "C Steele, Eric Thomas, lg kahn", singleThreaded: true) {
 		command "addThermostat"
 
 /* -= Attribute List =-
@@ -131,10 +152,19 @@ metadata {
 	   input name: "username", type: "text", title: "<b>Username</b>", description: "<i>Your Total Comfort User Name</i><p>", required: true
 	   input name: "password", type: "password", title: "<b>Password</b>", description: "<i>Your Total Comfort password</i><p>",required: true
 	   input name: "quickref", type: "hidden", title:"<a href='https://www.hubitatcommunity.com/QuikRef/honeywellThermoDriverInfo/index.html' target='_blank'>Quick Reference ${version()}</a>"
-	   input name: "debugOutput", type: "bool", title: "Enable debug logging?", defaultValue: true
+	   input "debugOutput", "bool",
+	   	title: "Enable debug logging", 
+	   	required: false,
+	   	defaultValue: false,
+	   	width: 2
+
+	   input "debugTimeout", "enum", required: false, defaultValue: "0", title: "Automatic debug Log Disable Timeout?", width: 3,  \
+	   	options: [ "0":"None", "1800":"30 Minutes", "3600":"60 Minutes", "86400":"1 Day" ]
+
 	   input name: "descTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
 	}
 }
+
 
 
 
@@ -142,6 +172,9 @@ void updated(){
 	log.info "updated..."
 	log.warn "debug logging is: ${debugOutput == true}"
 	log.warn "description logging is: ${descTextEnable == true}"
+	unschedule("logsOff")
+	Integer debugDisableSeconds = configuredDebugTimeoutSeconds()
+	if (debugOutput && debugDisableSeconds > 0) runIn(debugDisableSeconds, "logsOff", [overwrite:true])
 	clearTccSession() // credentials may have changed
 }
 
@@ -199,29 +232,107 @@ void logsOff(){
 	device.updateSetting("debugOutput",[value:"false",type:"bool"])
 }
 
+private String maskedHoneywellDeviceId(value) {
+	if (value == null) return "<unset>"
+	String raw = value.toString().trim()
+	if (!raw) return "<unset>"
+	if (raw.length() <= 3) return "xxx"
+	return "xxx${raw.substring(raw.length() - 3)}"
+}
+
+private def honeywellDeviceIdFor(cd) {
+	if (!cd) return null
+	return state.childParamMap?.get(childKey(cd))?.honeywelldevice
+}
+
+private Map sanitizedTccCommandBody(Map body) {
+	Map sanitized = [:]
+	body?.each { key, value ->
+		sanitized[key] = key?.toString()?.equalsIgnoreCase("DeviceID") ? maskedHoneywellDeviceId(value) : value
+	}
+	return sanitized
+}
+
+private String sanitizedTccLogText(value, deviceId = null) {
+	if (value == null) return "unknown failure"
+	String sanitized = value.toString()
+	List<String> knownIds = []
+	if (deviceId != null) knownIds << deviceId.toString().trim()
+	if (state.childParamMap instanceof Map) {
+		state.childParamMap.values().each { childParams ->
+			if (childParams instanceof Map && childParams.honeywelldevice != null)
+				knownIds << childParams.honeywelldevice.toString().trim()
+		}
+	}
+	knownIds.findAll { it }.unique().sort { a, b -> b.length() <=> a.length() }.each { String raw ->
+		String masked = maskedHoneywellDeviceId(raw)
+		if (raw.length() > 3) {
+			sanitized = sanitized.replace(raw, masked)
+		} else {
+			// Avoid replacing every occurrence of a short numeric ID in status codes or timestamps.
+			sanitized = sanitized.replace("/${raw}", "/${masked}")
+			sanitized = sanitized.replace("DeviceID:${raw}", "DeviceID:${masked}")
+			sanitized = sanitized.replace("DeviceID=${raw}", "DeviceID=${masked}")
+		}
+	}
+	// Catch a Device ID embedded in an endpoint even if an asynchronous response arrives
+	// after that child's configured ID has changed.
+	sanitized = sanitized.replaceAll(/(?i)(CheckDataSession|Control)\/([^\/\s?]+)/) { full, endpoint, raw ->
+		return "${endpoint}/${maskedHoneywellDeviceId(raw)}"
+	}
+	return sanitized
+}
+
+private String sanitizedTccFailure(e, deviceId = null) {
+	String failureType = e?.class?.simpleName ?: "Exception"
+	String detail = e?.message ?: e?.toString()
+	return "${failureType}: ${sanitizedTccLogText(detail, deviceId)}"
+}
+
+private Integer configuredDebugTimeoutSeconds() {
+	try {
+		return (settings?.debugTimeout ?: "0").toString().toInteger()
+	} catch (ignored) {
+		log.warn "Invalid debug logging timeout '${settings?.debugTimeout}'; automatic disable is not scheduled."
+		return 0
+	}
+}
+
 
 //
 // child (component) device methods
 //
-void componentDoRefresh(cd, Boolean fromUnauth = false) {
-	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', unit: = °${location.temperatureScale}, fromUnauth = $fromUnauth"
+void componentDoRefresh(cd, Boolean fromUnauth = false, Integer transientRetry = 0, refreshGeneration = null) {
+	String childNumber = childKey(cd)
+	Long generation = refreshGeneration == null ? beginRefreshGeneration(childNumber) : (refreshGeneration as Long)
+	if (!refreshGenerationIsCurrent(childNumber, generation)) {
+		if (debugOutput) log.debug "Ignoring stale refresh generation ${generation} for ${cd.displayName}"
+		return
+	}
+	if (debugOutput) log.debug "received Refresh request from ${cd.displayName} to Honeywell TCC 'refresh', unit: = °${location.temperatureScale}, fromUnauth = $fromUnauth, transientRetry = $transientRetry, generation = $generation"
 	Map session = getTccSession(cd)
 	if (session.status != "ready") {
 		Integer delay = (session.retryAfter ?: loginBackoffSeconds) as Integer
 		if (session.status == "deferred") {
 			if (debugOutput) log.debug "${cd.displayName}: another TCC login is in progress; retrying refresh in ${delay} seconds"
-			scheduleRefreshRetry(cd, delay, fromUnauth)
+			scheduleRefreshRetry(cd, delay, fromUnauth, transientRetry, generation)
 		} else if (!fromUnauth) {
 			if (debugOutput) log.debug "${cd.displayName}: TCC login unavailable; retrying refresh in ${delay} seconds"
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
-			scheduleRefreshRetry(cd, delay, true)
+			scheduleRefreshRetry(cd, delay, true, transientRetry, generation)
 		} else {
+			finishRefreshGeneration(childNumber, generation, "failed")
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 		}
 		return
 	}
-	getHumidifierStatus(cd, session.cookies)
-	getStatus(cd, fromUnauth, session)
+	Long requestToken = getStatus(cd, fromUnauth, session, transientRetry, generation) as Long
+	if (requestToken == null) return
+	try {
+		getHumidifierStatus(cd, session.cookies, generation, requestToken)
+	} catch (e) {
+		log.warn "${cd.displayName}: optional humidifier status request could not be started: ${sanitizedTccFailure(e, honeywellDeviceIdFor(cd))}"
+	}
 }
 
 void componentDeleteThermostatChild(cd) {
@@ -238,6 +349,11 @@ void componentDeleteThermostatChild(cd) {
 	state.deviceSetting = (state.deviceSetting ?: [:]).findAll { it.key.toString() != childNumber }
 	state.childParamMap = (state.childParamMap ?: [:]).findAll { it.key.toString() != childNumber }
 	state.childStatus = (state.childStatus ?: [:]).findAll { it.key.toString() != childNumber }
+	state.commandState = (state.commandState ?: [:]).findAll { it.key.toString() != childNumber }
+	state.refreshState = (state.refreshState ?: [:]).findAll { it.key.toString() != childNumber }
+	tccCommandStateLocks.remove("${device.id}:${childNumber}")
+	String activePrefix = "${device.id}:${childNumber}:"
+	tccActiveCommandAttempts.keySet().findAll { it.startsWith(activePrefix) }.each { tccActiveCommandAttempts.remove(it) }
 	state.nextChild = nextAvailableChildNumber()
 	if (debugOutput) log.debug "Deleted thermostat child ${thermostatDni} and its exact state entries; next child: ${state.nextChild}"
 }
@@ -310,17 +426,18 @@ void setThermostatMode(cd, mode) {
 	if (debugOutput) log.debug "setThermostatMode: $mode"
 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+	def systemSwitch
 	if (state.childParamMap."${dniParts[2]}".emergencyHeatCommand == "0") {
-		state.deviceSetting."${dniParts[2]}".SystemSwitch = modeMap0.find{ mode == it.key }?.value }
+		systemSwitch = modeMap0.find{ mode == it.key }?.value }
 	else {
-		state.deviceSetting."${dniParts[2]}".SystemSwitch = modeMap4.find{ mode == it.key }?.value }
-	setStatus(cd)
-
-	if(device.data.SetStatus==1)
-	{
-		getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value:mode, descriptionText:"${cd.displayName} Thermostat was Set to $mode"]])
-	    	cd.setLastRunningMode(mode) 
+		systemSwitch = modeMap4.find{ mode == it.key }?.value }
+	if (systemSwitch == null) {
+		log.warn "${cd.displayName}: unsupported thermostat mode '$mode'"
+		return
 	}
+	queueTccCommand(cd,
+		[SystemSwitch:systemSwitch],
+		[thermostatMode:[value:mode, descriptionText:"${cd.displayName} Thermostat was Set to $mode", setLastRunningMode:true]])
 }
 
 void componentSetThermostatMode(cd, mode) {
@@ -337,9 +454,10 @@ void componentSetCoolingSetpoint(cd, val) {
 	val = limitSetpoint(cd, val, "cool")
 	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	deviceSettingInitDB(cd, state.childParamMap."${dniParts[2]}".setPermHold) 	 // reset all params, then set individually
-	state.deviceSetting."${dniParts[2]}".CoolSetpoint = val
-	setStatus(cd)
+	Map commandValues = [CoolSetpoint:val]
+	def permanentHold = state.childParamMap."${dniParts[2]}".setPermHold
+	if (permanentHold != null) commandValues += [StatusHeat:permanentHold, StatusCool:permanentHold]
+	queueTccCommand(cd, commandValues)
 	getChildDevice(cd.deviceNetworkId).parse([[name:"coolingSetpoint", value:val, descriptionText:"${cd.displayName} Cooling Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatSetpoint", value:val, descriptionText:"${cd.displayName} Thermostat Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
 }
@@ -350,30 +468,39 @@ void componentSetHeatingSetpoint(cd, val) {
 	val = limitSetpoint(cd, val, "heat")
 	if (valIn != val) log.warn "SetPoint limited due to: out of range" 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	deviceSettingInitDB(cd, state.childParamMap."${dniParts[2]}".setPermHold) 	 // reset all params, then set individually
-	state.deviceSetting."${dniParts[2]}".HeatSetpoint = val
-	setStatus(cd)
+	Map commandValues = [HeatSetpoint:val]
+	def permanentHold = state.childParamMap."${dniParts[2]}".setPermHold
+	if (permanentHold != null) commandValues += [StatusHeat:permanentHold, StatusCool:permanentHold]
+	queueTccCommand(cd, commandValues)
 	getChildDevice(cd.deviceNetworkId).parse([[name:"heatingSetpoint", value:val, descriptionText:"${cd.displayName} Heating Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatSetpoint", value:val, descriptionText:"${cd.displayName} Thermostat Setpoint is ${val}", unit:"°${location.temperatureScale}"]])
 }
 
 void componentHeatLevelDown(cd) {
-	float val = (location.temperatureScale == "F") ? cd.currentValue("heatingSetpoint") - 1 : cd.currentValue("heatingSetpoint") - 0.5
+	Float base = pendingSetpointBase(cd, "HeatSetpoint", "heatingSetpoint")
+	if (base == null) return
+	float val = (location.temperatureScale == "F") ? base - 1 : base - 0.5
 	componentSetHeatingSetpoint(cd, val)
 }
 
 void componentHeatLevelUp(cd) {
-	float val = (location.temperatureScale == "F") ? cd.currentValue("heatingSetpoint") + 1 : cd.currentValue("heatingSetpoint") + 0.5
+	Float base = pendingSetpointBase(cd, "HeatSetpoint", "heatingSetpoint")
+	if (base == null) return
+	float val = (location.temperatureScale == "F") ? base + 1 : base + 0.5
 	componentSetHeatingSetpoint(cd, val)
 }
 
 void componentCoolLevelDown(cd) {
-	float val = (location.temperatureScale == "F") ? cd.currentValue("coolingSetpoint") - 1 : cd.currentValue("coolingSetpoint") - 0.5
+	Float base = pendingSetpointBase(cd, "CoolSetpoint", "coolingSetpoint")
+	if (base == null) return
+	float val = (location.temperatureScale == "F") ? base - 1 : base - 0.5
 	componentSetCoolingSetpoint(cd, val)
 }
 
 void componentCoolLevelUp(cd) {
-	float val = (location.temperatureScale == "F") ? cd.currentValue("coolingSetpoint") + 1 : cd.currentValue("coolingSetpoint") + 0.5
+	Float base = pendingSetpointBase(cd, "CoolSetpoint", "coolingSetpoint")
+	if (base == null) return
+	float val = (location.temperatureScale == "F") ? base + 1 : base + 0.5
 	componentSetCoolingSetpoint(cd, val)
 }
 // end of section
@@ -402,28 +529,21 @@ void componentFanOn(cd) {
 
 def setThermostatFanMode(cd, mode) { 
 	if (debugOutput) log.debug "setThermostatFanMode: $mode"
-	def fanMode = null
-	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	state.deviceSetting."${dniParts[2]}".FanMode = fanMap.find{ mode == it.key }?.value
-	setStatus(cd)
-
-	if(device.data.SetStatus==1)
-	{
-		getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatFanMode", value:mode, descriptionText:"${cd.displayName} Fan was Set to $mode"]])
+	def fanMode = fanMap.find{ mode == it.key }?.value
+	if (fanMode == null) {
+		log.warn "${cd.displayName}: unsupported fan mode '$mode'"
+		return
 	}
+	queueTccCommand(cd,
+		[FanMode:fanMode],
+		[thermostatFanMode:[value:mode, descriptionText:"${cd.displayName} Fan was Set to $mode"]])
 }
 // end of section
 
 
 void componentSetFollowSchedule(cd) {
 	if (descTextEnable) log.info "received Set Follow Schedule request from ${cd.displayName}"
-	deviceSettingInitDB(cd, 0) 	 // reset all params, then set individually
-	setStatus(cd)
-	
-	if(device.data.SetStatus==1)
-	{
-		getChildDevice(cd.deviceNetworkId).parse([[name:"mode", value:"off", descriptionText:"${cd.displayName} was Set to Follow Schedule"]])
-	}
+	queueTccCommand(cd, [StatusHeat:0, StatusCool:0])
 }
 
 
@@ -457,15 +577,20 @@ void setOutdoorHumidity(cd, value){
 	       
    ------------------------------------------------------------------ */
 
-def getStatus(cd, Boolean fromUnauth = false, Map session = null) {
+def getStatus(cd, Boolean fromUnauth = false, Map session = null, Integer transientRetry = 0, refreshGeneration = null) {
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+	String childNumber = dniParts[2]
+	Long generation = refreshGeneration == null ? beginRefreshGeneration(childNumber) : (refreshGeneration as Long)
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return
+	Long requestToken = beginStatusRequest(childNumber, generation)
+	if (requestToken == null) return
+	def honeywellDeviceId = state.childParamMap."${dniParts[2]}".honeywelldevice
 	if (debugOutput) log.debug "enable outside temps = ${state.childParamMap."${dniParts[2]}".enableOutdoorTemps}"
-	def today = new Date()
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
-	//if (debugOutput) log.debug "https://${tccSite()}/portal/Device/CheckDataSession/${settings.honeywelldevice}?_=$today.time"
+	//if (debugOutput) log.debug "sending getStatus request for Device ID ${maskedHoneywellDeviceId(honeywellDeviceId)}"
 
 	def params = [
-	    uri: "https://${tccSite()}/portal/Device/CheckDataSession/${state.childParamMap."${dniParts[2]}".honeywelldevice}",
+	    uri: "${tccBaseUrl()}/portal/Device/CheckDataSession/${honeywellDeviceId}",
 	    headers: [
 	        'Accept': '*/*', // */ comment
 	        'DNT': '1',
@@ -475,7 +600,7 @@ def getStatus(cd, Boolean fromUnauth = false, Map session = null) {
 	        'Cache-Control': 'max-age=0',
 	        'Accept-Language': 'en-US,en,q=0.8',
 		        'Connection': 'close',
-	        'Referer': "https://${tccSite()}/portal",
+	        'Referer': "${tccBaseUrl()}/portal",
 	        'X-Requested-With': 'XMLHttpRequest',
 	        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
 	        'Cookie': session?.cookies
@@ -483,14 +608,22 @@ def getStatus(cd, Boolean fromUnauth = false, Map session = null) {
 		  timeout: statusRequestTimeoutSeconds
 	]
 
-	def pData = [dni:cd.deviceNetworkId, fromUnauth:fromUnauth, sid:session?.sid]
-	if (debugOutput) log.debug "sending getStatus request: ${params.uri}"
+	def pData = [dni:cd.deviceNetworkId, fromUnauth:fromUnauth, sid:session?.sid, transientRetry:transientRetry, refreshGeneration:generation, requestToken:requestToken]
+	if (debugOutput) log.debug "sending getStatus request for Device ID ${maskedHoneywellDeviceId(honeywellDeviceId)}"
 	asynchttpGet("getStatusHandler", params, pData)
+	return requestToken
 }
 
 def getStatusHandler (resp, data) {
 	def cd = getChildDevice(data?.dni)
 	if (!cd) return
+	String childNumber = childKey(cd)
+	Long generation = (data?.refreshGeneration ?: 0) as Long
+	Long requestToken = (data?.requestToken ?: 0) as Long
+	if (!claimStatusCallback(childNumber, generation, requestToken)) {
+		if (debugOutput) log.debug "Ignoring stale or duplicate getStatus callback generation ${generation}, request ${requestToken} for ${cd.displayName}"
+		return
+	}
 	Boolean sessionRejected = false
 	try {
 		if (resp == null) throw new IllegalStateException("async request returned no response")
@@ -512,27 +645,29 @@ def getStatusHandler (resp, data) {
 				throw new IllegalStateException("response did not contain thermostat data")
 			}
 			confirmTccSession(data?.sid)
-			//if (debugOutput) { 
-			//    log.debug "Request was successful, $resp.status"
-			//    log.debug "data: $setStatusResult, rdata: $data"
-			//    log.debug "ld: $setStatusResult.latestData.uiData"
-			//    log.debug "ld: $setStatusResult.latestData.fanData"
-			//}
+			//if (debugOutput) log.debug "getStatus request was successful, $resp.status"
 			getStatusDistrib(cd, setStatusResult)
+			finishRefreshGeneration(childNumber, generation, "complete")
 			return
 		}
 		else {
 			throw new IllegalStateException("HTTP ${responseStatus}")
 		}
-	    }
+	}
 	catch (e) {
 		if (sessionRejected) invalidateTccSession(data?.sid)
-		if (debugOutput) log.error "getStatus response invalid for ${cd.displayName}: $e"
+		if (debugOutput) log.debug "getStatus response invalid for ${cd.displayName}: ${sanitizedTccFailure(e, honeywellDeviceIdFor(cd))}"
+		Integer transientRetry = (data?.transientRetry ?: 0) as Integer
 		if (sessionRejected && data?.fromUnauth != true) {
 			if (descTextEnable) log.info "TCC session rejected for ${cd.displayName}; retrying login in 60 seconds"
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
-			scheduleRefreshRetry(cd, 60, true)
+			scheduleRefreshRetry(cd, loginBackoffSeconds, true, transientRetry, generation)
+		} else if (!sessionRejected && transientRetry < maxTransientRequestRetries) {
+			log.warn "${cd.displayName}: transient TCC status failure; retrying in ${transientRequestRetrySeconds} seconds."
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry request", descriptionText:"${cd.displayName} TCC transaction: retry request"]])
+			scheduleRefreshRetry(cd, transientRequestRetrySeconds, data?.fromUnauth == true, transientRetry + 1, generation)
 		} else {
+			finishRefreshGeneration(childNumber, generation, "failed")
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
 			if (sessionRejected) {
 				log.warn "${cd.displayName}: status failed after authentication retry; waiting until the next poll."
@@ -540,7 +675,7 @@ def getStatusHandler (resp, data) {
 				log.warn "${cd.displayName}: transient TCC status failure; waiting until the next poll."
 			}
 		}
-	    }
+	}
 }
 
 
@@ -573,6 +708,7 @@ def getStatusDistrib(cd, Map decodedResult) {
 	thermostatStatus.coolUpperSetptLimit = decodedResult.latestData.uiData.CoolUpperSetptLimit
 	state.childStatus[childNumber] = thermostatStatus
 	removeLegacyGlobalCapabilities()
+
 
 	String[] dniParts = cd.deviceNetworkId.split("[-_]") // which child 'owns this'?
 	
@@ -647,13 +783,17 @@ def getStatusDistrib(cd, Map decodedResult) {
 }
 
 
-def getHumidifierStatus(cd, String cookies) {
+def getHumidifierStatus(cd, String cookies, refreshGeneration = null, statusRequestToken = null) {
 	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+	String childNumber = dniParts[2]
+	Long generation = refreshGeneration == null ? beginRefreshGeneration(childNumber) : (refreshGeneration as Long)
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return
+	def honeywellDeviceId = state.childParamMap."${dniParts[2]}".honeywelldevice
 	if (debugOutput)  log.debug "in get humid status enable humidity = ${state.childParamMap."${dniParts[2]}".enableHumidity}"
 	if (state.childParamMap."${dniParts[2]}".haveHumidifier == 'No') return
 	
 	def params = [
-	  uri: "https://${tccSite()}/portal/Device/CheckDataSession/${state.childParamMap."${dniParts[2]}".honeywelldevice}",
+	  uri: "${tccBaseUrl()}/portal/Device/CheckDataSession/${honeywellDeviceId}",
         headers: [
             'Accept': '*/*', // */ comment
             'DNT': '1',
@@ -663,33 +803,39 @@ def getHumidifierStatus(cd, String cookies) {
             'Cache-Control': 'max-age=0',
             'Accept-Language': 'en-US,en,q=0.8',
             'Connection': 'keep-alive',
-            'Host': 'rs.alarmnet.com',
-            'Referer': "https://${tccSite()}/portal/",
+	            'Host': "${humidifierHost()}",
+	            'Referer': "${tccBaseUrl()}/portal/",
             'X-Requested-With': 'XMLHttpRequest',
             'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
 	        'Cookie': cookies
         ],
-	  timeout: 10
-    ]
+		  timeout: 10
+	    ]
 
-	if (debugOutput) log.debug "sending gethumidStatus request: ${params.uri}"
-	def pData = [dni:cd.deviceNetworkId]
+	if (debugOutput) log.debug "sending gethumidStatus request for Device ID ${maskedHoneywellDeviceId(honeywellDeviceId)}"
+	def pData = [dni:cd.deviceNetworkId, refreshGeneration:generation, requestToken:statusRequestToken]
 	asynchttpGet("getHumidStatusHandler", params, pData)
 }
 
 
 def getHumidStatusHandler(resp, data) {
+	def cdd = getChildDevice(data?.dni)
+	if (!cdd) return
+	Long generation = (data?.refreshGeneration ?: 0) as Long
+	Long requestToken = (data?.requestToken ?: 0) as Long
+	if (!refreshRequestIsCurrent(childKey(cdd), generation, requestToken)) {
+		if (debugOutput) log.debug "Ignoring stale humidifier callback generation ${generation}, request ${requestToken} for ${cdd.displayName}"
+		return
+	}
 	if(resp.getStatus() == 200 || resp.getStatus() == 207) {
 		if (debugOutput) log.debug "GetHumidity Request was successful, $resp.status"
-		def cdd = getChildDevice(data?.dni)
-		if (!cdd) return
 		def response = resp.getData().toString()
 		getHumidifierDistrib (cdd, response)
 	}
 }
 
 def getHumidifierDistrib (cd, resp) {
-	Map CancelLine = [:]
+	String CancelLine = ""
 	Integer HumLevel = 0
 	Integer HumMin   = 1
 	Integer HumMax   =99
@@ -708,6 +854,7 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p21 = pair2[1]
 	    		def p22 = pair2[2]
 		
+		
 	    		HumLevel = p21.toInteger()
 	    		HumMin = p20.toInteger()
 		
@@ -715,13 +862,14 @@ def getHumidifierDistrib (cd, resp) {
 	    		def p30 = pair3[0]
 		
 	    		HumMax = p30.toInteger() 
+		
 		}
 	}
         
      	//Send events via Child
-	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierSetPoint", value:HumLevel as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumLevel", unit:"%"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierUpperLimit", value:HumMax as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierLowerLimit", value:HumMin as Integer, descriptionText:"${cd.displayName} Humidifier was Set to $HumMin", unit:"%"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierSetPoint", value:HumLevel as Integer, descriptionText:"${cd.displayName} Humidifier Setpoint was Set to $HumLevel", unit:"%"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierUpperLimit", value:HumMax as Integer, descriptionText:"${cd.displayName} Humidifier Upper Limit was Set to $HumMax", unit:"%"]])
+	getChildDevice(cd.deviceNetworkId).parse([[name:"humidifierLowerLimit", value:HumMin as Integer, descriptionText:"${cd.displayName} Humidifier Lower Limit was Set to $HumMin", unit:"%"]])
 	
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
 }
@@ -729,104 +877,165 @@ def getHumidifierDistrib (cd, resp) {
 
 /* ------------------------------------------------------------------
 
-	setStatus(cd)
+	Command delivery isolation
 
-	Purpose: Send accumulated settings to the Thermostat
+	Each child has three distinct command areas:
+	  - state.deviceSetting[key]: live values still accumulating from UI commands
+	  - state.commandState[key].inFlight: one immutable snapshot being delivered/retried
+	  - state.commandState[key].failed: a bounded-out snapshot retained for a later user action
 
-	Notes: To accumulate, each new UI button push restarts an accumulation timer (runInMillis) 
-	       waiting 1.6 seconds after each click. 
-	       
-	       login does not use the Honeywell Device ID
+	A command ID guards every retry and completion. A response can settle only the exact
+	snapshot that created it, and never clears values that arrived while it was in flight.
 
    ------------------------------------------------------------------ */
 
-void setStatus(cd) {
-	def pData = [data:['cd':[cd.deviceNetworkId]]]
-	runInMillis( 1600, settingsAccumWait, pData )
+private void queueTccCommand(cd, Map values, Map acknowledgedEvents = [:]) {
+	String key = childKey(cd)
+	Integer token = withCommandStateLock(key) { Map commandState ->
+		restoreFailedCommandLocked(key, commandState)
+		Map pending = state.deviceSetting[key]
+		values?.each { name, value -> pending[name] = value }
+		Map pendingEvents = commandState["pendingEvents"] ?: [:]
+		acknowledgedEvents?.each { name, eventData ->
+			pendingEvents[name] = eventData instanceof Map ? new LinkedHashMap(eventData) : eventData
+		}
+		commandState["pendingEvents"] = pendingEvents
+		commandState["sendToken"] = ((commandState["sendToken"] ?: 0) as Integer) + 1
+		state.deviceSetting[key] = pending
+		state.commandState[key] = commandState
+		return commandState["sendToken"] as Integer
+	}
+	scheduleCommandAccumulation(cd, token, commandAccumulationMillis)
 }
 
-void settingsAccumWait(data) {
-	def cdd = data?.dni ?: data["cd"]
-	if (cdd instanceof List) cdd = cdd[0]
-	Integer authRetry = (data?.authRetry ?: 0) as Integer
-	def cd = getChildDevice(cdd)
+private void scheduleCommandAccumulation(cd, Integer token, Integer delayMillis) {
+	runInMillis(delayMillis, "settingsAccumWait", [overwrite:false, data:[dni:cd.deviceNetworkId, token:token]])
+}
+
+private void scheduleCommandFollowup(cd, Integer token) {
+	runIn(commandFollowupSeconds, "settingsAccumWait", [overwrite:false, data:[dni:cd.deviceNetworkId, token:token]])
+}
+
+void settingsAccumWait(Map data) {
+	def cd = getChildDevice(data?.dni)
 	if (!cd) return
-	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	// Snapshot only the settings currently waiting to be sent. A retry after another
-	// handler has already sent them must not submit an empty control request.
-	def deltaStates = state.deviceSetting."${dniParts[2]}".findAll{it.value != null}
-	if (!deltaStates) return
+	Map started = beginCommandSnapshot(cd, data?.token)
+	if (started["status"] != "ready") return
+	deliverCommandSnapshot(cd, started["commandId"])
+}
 
-	device.data.SetStatus = 0
+void retryTccCommand(Map data) {
+	def cd = getChildDevice(data?.dni)
+	if (!cd) return
+	deliverCommandSnapshot(cd, data?.commandId)
+}
+
+private Map beginCommandSnapshot(cd, token) {
+	String key = childKey(cd)
+	return withCommandStateLock(key) { Map commandState ->
+		if (token != null && "${token}" != "${commandState['sendToken']}") return [status:"stale"]
+		if (commandState["inFlight"] instanceof Map) return [status:"busy"]
+
+		Map pending = state.deviceSetting[key]
+		Map fields = new LinkedHashMap(pending.findAll { name, value -> value != null })
+		if (!fields) return [status:"empty"]
+
+		Long commandId = ((commandState["nextCommandId"] ?: 0) as Long) + 1L
+		Map body = new LinkedHashMap(fields)
+		body.DeviceID = state.childParamMap[key].honeywelldevice
+		body.DisplayUnits = location.temperatureScale
+		Map events = copyCommandEvents(commandState["pendingEvents"] as Map)
+		Map snapshot = [id:commandId, commandValues:fields, body:body, events:events,
+			authRetry:0, transientRetry:0, createdAt:now()]
+
+		fields.each { name, value -> pending[name] = null }
+		commandState["pendingEvents"] = [:]
+		commandState["nextCommandId"] = commandId
+		commandState["inFlight"] = snapshot
+		state.deviceSetting[key] = pending
+		state.commandState[key] = commandState
+		return [status:"ready", commandId:commandId]
+	}
+}
+
+private void deliverCommandSnapshot(cd, commandId) {
+	String key = childKey(cd)
+	Map snapshot = claimCommandAttempt(key, commandId)
+	if (!snapshot) return
+
 	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"begin", descriptionText:"${cd.displayName} TCC transaction: begin"]])
-
 	Map session = getTccSession(cd)
 	if (session.status != "ready") {
-		if (session.status == "deferred") {
-			Integer delay = (session.retryAfter ?: loginDeferredSeconds) as Integer
-			if (debugOutput) log.debug "${cd.displayName}: another TCC login is in progress; retrying settings in ${delay} seconds"
-			runIn(delay, "settingsAccumWait", [overwrite:false, data:[dni:cd.deviceNetworkId, authRetry:authRetry]])
+		Integer delay = (session.retryAfter ?: loginBackoffSeconds) as Integer
+		if (session.status in ["deferred", "backoff"]) {
+				if (debugOutput) log.debug "${cd.displayName}: TCC login is deferred; retrying command ${snapshot['id']} in ${delay} seconds"
+				releaseCommandAttempt(key, snapshot["id"])
+				scheduleCommandRetry(cd, snapshot["id"], delay)
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+			} else if (reserveCommandRetry(key, snapshot["id"], "authRetry", maxCommandAuthenticationRetries)) {
+				log.warn "${cd.displayName}: TCC login unavailable; retrying command ${snapshot['id']} in ${delay} seconds."
+				scheduleCommandRetry(cd, snapshot["id"], delay)
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
 		} else {
-			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+				log.error "TCC command ${snapshot['id']} failed for ${cd.displayName}: login unavailable after retry; command retained."
+				finishCommandFailure(cd, snapshot["id"])
 		}
-		return // retain the unsent settings for a later attempt
+		return
 	}
-	if (debugOutput) log.debug "Honeywell TCC 'setStatus'"
-	def today = new Date()
-	deltaStates["DeviceID"] = state.childParamMap."${dniParts[2]}".honeywelldevice
-	deltaStates["DisplayUnits"] = location.temperatureScale
-	if (debugOutput) log.debug "setStatus body: $deltaStates"
 
-	
-	def params = [
-	    uri: "https://${tccSite()}/portal/Device/SubmitControlScreenChanges",
-	    headers: [
-	        'Accept': 'application/json, text/javascript, */*; q=0.01', // */ comment
-	        'DNT': '1',
-	        'Accept-Encoding': 'gzip,deflate,sdch',
-	        'Cache-Control': 'max-age=0',
-	        'Accept-Language': 'en-US,en,q=0.8',
-	        'Connection': 'keep-alive',
-	        'Host': "${tccSite()}",
-	        'Referer': "https://${tccSite()}/portal/Device/Control/${state.childParamMap."${dniParts[2]}".honeywelldevice}",
-	        'X-Requested-With': 'XMLHttpRequest',
-	        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
-	        'Cookie': session.cookies
-	    ],
-	    body: deltaStates,
-	  timeout: 10
+	Map body = new LinkedHashMap(snapshot["body"] as Map)
+	def honeywellDeviceId = body.DeviceID
+	if (debugOutput) {
+		log.debug "Honeywell TCC 'setStatus' command ${snapshot['id']}"
+		log.debug "setStatus body: ${sanitizedTccCommandBody(body)}"
+	}
+	Map params = [
+		uri: "${tccBaseUrl()}/portal/Device/SubmitControlScreenChanges",
+		headers: [
+			'Accept': 'application/json, text/javascript, */*; q=0.01', // */ comment
+			'DNT': '1',
+			'Accept-Encoding': 'gzip,deflate,sdch',
+			'Cache-Control': 'max-age=0',
+			'Accept-Language': 'en-US,en,q=0.8',
+			'Connection': 'keep-alive',
+			'Host': "${tccHost()}",
+			'Referer': "${tccBaseUrl()}/portal/Device/Control/${honeywellDeviceId}",
+			'X-Requested-With': 'XMLHttpRequest',
+			'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36',
+			'Cookie': session.cookies
+		],
+		body: body,
+		timeout: 10
 	]
 
-	Boolean sent = false
-	Boolean authRejected = false
 	try {
-		httpPost(params) {
-		    resp ->
-			def setStatusResult = resp.data
-			if (debugOutput) log.debug "Request was successful, $resp.status"
-			device.data.SetStatus = 1
-			sent = true
-			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
+		httpPost(params) { resp ->
+			if (debugOutput) log.debug "Command ${snapshot['id']} request was successful, ${resp.status}"
 		}
-	} 
-	catch (e) {
-		if (e instanceof groovyx.net.http.HttpResponseException && e.statusCode in [302, 401, 403]) {
-			authRejected = true
-			invalidateTccSession(session.sid)
-		}
-		log.error "Something went wrong: $e"
-		if (authRejected && authRetry < 1) {
-			runIn(loginBackoffSeconds, "settingsAccumWait", [overwrite:false, data:[dni:cd.deviceNetworkId, authRetry:authRetry + 1]])
+		finishCommandSuccess(cd, snapshot["id"])
+	} catch (e) {
+		Integer httpStatus = tccHttpStatus(e)
+		Boolean authRejected = httpStatus in [302, 401, 403]
+		if (authRejected) invalidateTccSession(session.sid)
+
+		if (authRejected && reserveCommandRetry(key, snapshot["id"], "authRetry", maxCommandAuthenticationRetries)) {
+			if (debugOutput) log.debug "TCC command ${snapshot['id']} authentication rejected for ${cd.displayName}: ${sanitizedTccFailure(e, honeywellDeviceId)}"
+			scheduleCommandRetry(cd, snapshot["id"], loginBackoffSeconds)
 			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry login", descriptionText:"${cd.displayName} TCC transaction: retry login"]])
+		} else if (!authRejected && reserveCommandRetry(key, snapshot["id"], "transientRetry", maxTransientRequestRetries)) {
+			if (debugOutput) log.debug "TCC command ${snapshot['id']} transient failure for ${cd.displayName}: ${sanitizedTccFailure(e, honeywellDeviceId)}"
+			log.warn "${cd.displayName}: transient TCC command ${snapshot['id']} failure; retrying in ${transientRequestRetrySeconds} seconds."
+			scheduleCommandRetry(cd, snapshot["id"], transientRequestRetrySeconds)
+			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"retry request", descriptionText:"${cd.displayName} TCC transaction: retry request"]])
 		} else {
-			getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+			log.error "TCC command ${snapshot['id']} failed for ${cd.displayName}: ${sanitizedTccFailure(e, honeywellDeviceId)}; command retained."
+			finishCommandFailure(cd, snapshot["id"])
 		}
 	}
+}
 
-	// Clear only the values in the successful snapshot. Commands that arrived while
-	// the POST was in progress remain pending for their own scheduled send.
-	if (sent) clearSentDeviceSettings(cd, deltaStates)
+private void scheduleCommandRetry(cd, commandId, Integer delaySeconds) {
+	runIn(delaySeconds, "retryTccCommand", [overwrite:false, data:[dni:cd.deviceNetworkId, commandId:commandId]])
 }
 
 
@@ -841,6 +1050,20 @@ void settingsAccumWait(data) {
 	         final confirmation that a candidate session works.
 
    ------------------------------------------------------------------ */
+
+private String tccBaseUrl() {
+	String baseUrl = "https://${tccSite()}"
+	return baseUrl.replaceAll('/+$', '')
+}
+
+private String tccHost() {
+	return tccBaseUrl().replaceFirst(/^https?:\/\//, '').tokenize('/')[0]
+}
+
+private String humidifierHost() {
+	String host = 'rs.alarmnet.com'
+	return host
+}
 
 private String tccSessionKey() { device.id.toString() }
 
@@ -916,14 +1139,14 @@ private void clearTccSession() {
 private Map performTccLogin(cd) {
 	if (debugOutput) log.debug "Honeywell TCC 'login'"
 	Map params = [
-		uri: "https://${tccSite()}/portal/",
+		uri: "${tccBaseUrl()}/portal/",
 		headers: [
 			'Content-Type': 'application/x-www-form-urlencoded',
 			'Accept': 'application/json, text/javascript, */*; q=0.01', // */
 			'Accept-Encoding': 'sdch',
-			'Host': "${tccSite()}",
+			'Host': "${tccHost()}",
 			'DNT': '1',
-			'Origin': "https://${tccSite()}/portal/",
+			'Origin': "${tccBaseUrl()}/portal/",
 			'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/28.0.1500.95 Safari/537.36'
 		],
 		body: [timeOffset: '240', UserName: "${settings.username}", Password: "${settings.password}", RememberMe: 'false'],
@@ -948,7 +1171,7 @@ private Map performTccLogin(cd) {
 			}
 		}
 	} catch (e) {
-		log.warn "${cd.displayName}: TCC login failed: ${e.message ?: e}"
+		log.warn "${cd.displayName}: TCC login failed: ${sanitizedTccFailure(e)}"
 		return null
 	}
 
@@ -989,38 +1212,183 @@ void setParams(cDNI, dev, hH, eOT, eH, sPH, pI, eHC) {
 	state.childParamMap[childNumber].pollIntervals 		= pI
 	state.childParamMap[childNumber].emergencyHeatCommand 	= eHC
 
-	if (debugOutput) log.debug "ChildParams: $cDNI, $dev, $hH, $eOT, $eH, $sPH, $pI, $eHC, -${state.childParamMap[childNumber].honeywelldevice}-"
+	if (debugOutput) log.debug "ChildParams: $cDNI, ${maskedHoneywellDeviceId(dev)}, $hH, $eOT, $eH, $sPH, $pI, $eHC"
 }
 
-// initialize the device values. Each method overwrites it's specific value
-def deviceSettingInitDB(cd, val) { 	 // reset all params, then set individually
-	String[] dniParts = cd.deviceNetworkId.split("[-_]")
+private Semaphore commandStateLock(String childNumber) {
+	String lockKey = "${device.id}:${childNumber}"
+	tccCommandStateLocks.putIfAbsent(lockKey, new Semaphore(1))
+	return tccCommandStateLocks.get(lockKey)
+}
 
-	state.deviceSetting."${dniParts[2]}".StatusHeat = val
-	state.deviceSetting."${dniParts[2]}".StatusCool = val
-
-	// don't clear multiple times
-	if ( val == null ) {
-		state.deviceSetting."${dniParts[2]}".SystemSwitch = null 
-		state.deviceSetting."${dniParts[2]}".HeatSetpoint = null
-		state.deviceSetting."${dniParts[2]}".CoolSetpoint = null
-		state.deviceSetting."${dniParts[2]}".HeatNextPeriod = null
-		state.deviceSetting."${dniParts[2]}".CoolNextPeriod = null
-		state.deviceSetting."${dniParts[2]}".FanMode = null
-		state.deviceSetting."${dniParts[2]}".TemporaryHoldUntilTime=null
-		state.deviceSetting."${dniParts[2]}".VacationHold=null
+private def withCommandStateLock(String childNumber, Closure work) {
+	Semaphore lock = commandStateLock(childNumber)
+	lock.acquireUninterruptibly()
+	try {
+		ensureChildMaps(childNumber)
+		return work.call(state.commandState[childNumber] as Map)
+	} finally {
+		lock.release()
 	}
 }
-// end of section
 
-private void clearSentDeviceSettings(cd, Map sent) {
-	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	Map current = state.deviceSetting."${dniParts[2]}"
-	if (!current) return
-	sent.each { String name, value ->
-		if (name in ["DeviceID", "DisplayUnits"]) return
-		if (current[name] == value) current[name] = null
+private Map copyCommandEvents(Map source) {
+	Map copy = [:]
+	(source ?: [:]).each { name, eventData ->
+		copy[name] = eventData instanceof Map ? new LinkedHashMap(eventData) : eventData
 	}
+	return copy
+}
+
+private String activeCommandAttemptKey(String childNumber, commandId) {
+	return "${device.id}:${childNumber}:${commandId}"
+}
+
+private void restoreFailedCommandLocked(String key, Map commandState) {
+	Map failed = commandState["failed"] instanceof Map ? commandState["failed"] as Map : null
+	if (!failed) return
+	Map pending = state.deviceSetting[key]
+	(failed["commandValues"] ?: [:]).each { name, value ->
+		if (pending[name] == null) pending[name] = value
+	}
+	Map pendingEvents = commandState["pendingEvents"] ?: [:]
+	(failed["events"] ?: [:]).each { name, eventData ->
+		if (!pendingEvents.containsKey(name))
+			pendingEvents[name] = eventData instanceof Map ? new LinkedHashMap(eventData) : eventData
+	}
+	commandState["pendingEvents"] = pendingEvents
+	commandState["failed"] = null
+	state.deviceSetting[key] = pending
+}
+
+private Map claimCommandAttempt(String key, commandId) {
+	return withCommandStateLock(key) { Map commandState ->
+		Map inFlight = commandState["inFlight"] instanceof Map ? commandState["inFlight"] as Map : null
+		if (!inFlight || "${inFlight['id']}" != "${commandId}") return null
+		String activeKey = activeCommandAttemptKey(key, commandId)
+		if (tccActiveCommandAttempts.putIfAbsent(activeKey, true) != null) return null
+		Map claimed = new LinkedHashMap(inFlight)
+		claimed["body"] = new LinkedHashMap(inFlight["body"] as Map)
+		claimed["commandValues"] = new LinkedHashMap(inFlight["commandValues"] as Map)
+		claimed["events"] = copyCommandEvents(inFlight["events"] as Map)
+		return claimed
+	}
+}
+
+private void releaseCommandAttempt(String key, commandId) {
+	tccActiveCommandAttempts.remove(activeCommandAttemptKey(key, commandId))
+}
+
+private Boolean reserveCommandRetry(String key, commandId, String counterName, Integer maximum) {
+	return withCommandStateLock(key) { Map commandState ->
+		Map inFlight = commandState["inFlight"] instanceof Map ? commandState["inFlight"] as Map : null
+		if (!inFlight || "${inFlight['id']}" != "${commandId}") return false
+		Integer used = (inFlight[counterName] ?: 0) as Integer
+		if (used >= maximum) return false
+		inFlight[counterName] = used + 1
+		commandState["inFlight"] = inFlight
+		state.commandState[key] = commandState
+		tccActiveCommandAttempts.remove(activeCommandAttemptKey(key, commandId))
+		return true
+	}
+}
+
+private void finishCommandSuccess(cd, commandId) {
+	String key = childKey(cd)
+	tccActiveCommandAttempts.remove(activeCommandAttemptKey(key, commandId))
+	Map result = withCommandStateLock(key) { Map commandState ->
+		Map inFlight = commandState["inFlight"] instanceof Map ? commandState["inFlight"] as Map : null
+		if (!inFlight || "${inFlight['id']}" != "${commandId}") return [settled:false]
+		Map events = copyCommandEvents(inFlight["events"] as Map)
+		commandState["inFlight"] = null
+		state.commandState[key] = commandState
+		Boolean hasPending = (state.deviceSetting[key] as Map).values().any { value -> value != null }
+		return [settled:true, events:events, hasPending:hasPending, token:(commandState["sendToken"] ?: 0) as Integer]
+	}
+	if (result["settled"] != true) return
+	emitAcknowledgedCommandEvents(cd, result["events"] as Map)
+	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"success", descriptionText:"${cd.displayName} TCC transaction: success"]])
+	if (result["hasPending"] == true) {
+		if (debugOutput) log.debug "Command ${commandId} completed with newer pending values; scheduling the next command in ${commandFollowupSeconds} second."
+		scheduleCommandFollowup(cd, result["token"] as Integer)
+	}
+}
+
+private void finishCommandFailure(cd, commandId) {
+	String key = childKey(cd)
+	tccActiveCommandAttempts.remove(activeCommandAttemptKey(key, commandId))
+	Map result = withCommandStateLock(key) { Map commandState ->
+		Map inFlight = commandState["inFlight"] instanceof Map ? commandState["inFlight"] as Map : null
+		if (!inFlight || "${inFlight['id']}" != "${commandId}") return [settled:false]
+		Map pending = state.deviceSetting[key]
+		Map pendingEvents = commandState["pendingEvents"] ?: [:]
+		Map previous = commandState["failed"] instanceof Map ? commandState["failed"] as Map : [:]
+		Map retainedFields = [:]
+		(previous["commandValues"] ?: [:]).each { name, value ->
+			if (pending[name] == null) retainedFields[name] = value
+		}
+		(inFlight["commandValues"] ?: [:]).each { name, value ->
+			if (pending[name] == null) retainedFields[name] = value
+		}
+		Map retainedEvents = [:]
+		(previous["events"] ?: [:]).each { name, eventData ->
+			if (!pendingEvents.containsKey(name))
+				retainedEvents[name] = eventData instanceof Map ? new LinkedHashMap(eventData) : eventData
+		}
+		(inFlight["events"] ?: [:]).each { name, eventData ->
+			if (!pendingEvents.containsKey(name))
+				retainedEvents[name] = eventData instanceof Map ? new LinkedHashMap(eventData) : eventData
+		}
+		commandState["failed"] = (retainedFields || retainedEvents) ? [commandValues:retainedFields, events:retainedEvents, failedAt:now()] : null
+		commandState["inFlight"] = null
+		state.commandState[key] = commandState
+		Boolean hasPending = (state.deviceSetting[key] as Map).values().any { value -> value != null }
+		return [settled:true, hasPending:hasPending, token:(commandState["sendToken"] ?: 0) as Integer]
+	}
+	if (result["settled"] != true) return
+	getChildDevice(cd.deviceNetworkId).parse([[name:"TCCstatus", value:"failed", descriptionText:"${cd.displayName} TCC transaction: failed"]])
+	if (result["hasPending"] == true) {
+		if (debugOutput) log.debug "Command ${commandId} failed with newer pending values; scheduling the next command in ${commandFollowupSeconds} second."
+		scheduleCommandFollowup(cd, result["token"] as Integer)
+	}
+}
+
+private void emitAcknowledgedCommandEvents(cd, Map events) {
+	(events ?: [:]).each { String name, Map eventData ->
+		Map event = [name:name, value:eventData["value"]]
+		if (eventData["descriptionText"]) event["descriptionText"] = eventData["descriptionText"]
+		if (eventData["unit"]) event["unit"] = eventData["unit"]
+		getChildDevice(cd.deviceNetworkId).parse([event])
+		if (eventData["setLastRunningMode"] == true) cd.setLastRunningMode(eventData["value"])
+	}
+}
+
+private Float pendingSetpointBase(cd, String fieldName, String attributeName) {
+	String key = childKey(cd)
+	def value = withCommandStateLock(key) { Map commandState ->
+		def pending = state.deviceSetting[key][fieldName]
+		if (pending != null) return pending
+		Map inFlight = commandState["inFlight"] instanceof Map ? commandState["inFlight"] as Map : null
+		if (inFlight?.get("commandValues")?.get(fieldName) != null) return inFlight["commandValues"][fieldName]
+		Map failed = commandState["failed"] instanceof Map ? commandState["failed"] as Map : null
+		return failed?.get("commandValues")?.get(fieldName)
+	}
+	if (value == null) value = cd.currentValue(attributeName)
+	Float numeric = toFloatOrNull(value)
+	if (numeric == null) log.warn "${cd.displayName}: current ${attributeName} is unknown. Refresh the thermostat and try again."
+	return numeric
+}
+
+private Integer tccHttpStatus(e) {
+	try {
+		if (e?.statusCode != null) return e.statusCode as Integer
+	} catch (ignored) { }
+	try {
+		if (e?.response?.status != null) return e.response.status as Integer
+	} catch (ignored) { }
+	String message = e?.message?.toString() ?: ""
+	def matcher = message =~ /(?i)(?:status code:\s*|HTTP\s*)(\d{3})/
+	return matcher.find() ? matcher.group(1).toInteger() : null
 }
 
 
@@ -1045,6 +1413,8 @@ private void ensureStateMaps() {
 	if (state.childParamMap == null) state.childParamMap = [:]
 	if (state.deviceSetting == null) state.deviceSetting = [:]
 	if (state.childStatus == null) state.childStatus = [:]
+	if (state.commandState == null) state.commandState = [:]
+	if (state.refreshState == null) state.refreshState = [:]
 }
 
 private void ensureChildMaps(String childNumber) {
@@ -1057,6 +1427,43 @@ private void ensureChildMaps(String childNumber) {
 	}
 	if (state.childStatus[childNumber] == null) {
 		state.childStatus[childNumber] = [isEmergencyHeatAllowed: null, heatLowerSetptLimit: null, heatUpperSetptLimit: null, coolLowerSetptLimit: null, coolUpperSetptLimit: null]
+	}
+	if (state.refreshState[childNumber] == null) {
+		state.refreshState[childNumber] = [nextGeneration:0L, activeGeneration:null, retryToken:0L, requestToken:0L, phase:"idle"]
+	} else if (state.refreshState[childNumber]["requestToken"] == null) {
+		Map refreshState = state.refreshState[childNumber] as Map
+		refreshState["requestToken"] = 0L
+		state.refreshState[childNumber] = refreshState
+	}
+	if (state.commandState[childNumber] == null) {
+		state.commandState[childNumber] = [schemaVersion:commandStateSchemaVersion, nextCommandId:0L, sendToken:0, pendingEvents:[:], inFlight:null, failed:null]
+	} else {
+		Map commandState = state.commandState[childNumber]
+		if (((commandState["schemaVersion"] ?: 0) as Integer) < commandStateSchemaVersion) {
+			Map orphaned = commandState["inFlight"] instanceof Map ? commandState["inFlight"] as Map : null
+			if (orphaned) {
+				Map pending = state.deviceSetting[childNumber]
+				Map orphanedValues = (orphaned.get("commandValues") ?: orphaned.get("fields") ?: [:]) as Map
+				orphanedValues.each { name, value ->
+					if (pending[name] == null) pending[name] = value
+				}
+				Map pendingEvents = commandState["pendingEvents"] instanceof Map ? commandState["pendingEvents"] as Map : [:]
+				(orphaned["events"] ?: [:]).each { name, eventData ->
+					if (!pendingEvents.containsKey(name))
+						pendingEvents[name] = eventData instanceof Map ? new LinkedHashMap(eventData) : eventData
+				}
+				state.deviceSetting[childNumber] = pending
+				commandState["pendingEvents"] = pendingEvents
+				commandState["inFlight"] = null
+				tccActiveCommandAttempts.remove(activeCommandAttemptKey(childNumber, orphaned["id"]))
+				if (debugOutput) log.debug "Recovered orphaned command ${orphaned['id']} for child ${childNumber} after command-state upgrade"
+			}
+			commandState["schemaVersion"] = commandStateSchemaVersion
+		}
+		if (commandState["nextCommandId"] == null) commandState["nextCommandId"] = 0L
+		if (commandState["sendToken"] == null) commandState["sendToken"] = 0
+		if (!(commandState["pendingEvents"] instanceof Map)) commandState["pendingEvents"] = [:]
+		state.commandState[childNumber] = commandState
 	}
 }
 
@@ -1139,8 +1546,86 @@ private void removeLegacyGlobalCapabilities() {
 	}
 }
 
-private void scheduleRefreshRetry(cd, Integer delay, Boolean fromUnauth) {
-	runIn(delay, "refreshFromRunin", [overwrite:false, data:[dni:cd.deviceNetworkId, fromUnauth:fromUnauth]])
+private Long beginRefreshGeneration(String childNumber) {
+	ensureChildMaps(childNumber)
+	Map refreshState = state.refreshState[childNumber] as Map
+	Long generation = ((refreshState["nextGeneration"] ?: 0) as Long) + 1L
+	refreshState["nextGeneration"] = generation
+	refreshState["activeGeneration"] = generation
+	refreshState["phase"] = "preparing"
+	state.refreshState[childNumber] = refreshState
+	return generation
+}
+
+private Boolean refreshGenerationIsCurrent(String childNumber, generation) {
+	if (generation == null) return false
+	ensureChildMaps(childNumber)
+	def activeGeneration = state.refreshState[childNumber]["activeGeneration"]
+	return activeGeneration != null && (activeGeneration as Long) == (generation as Long)
+}
+
+private Boolean refreshRequestIsCurrent(String childNumber, generation, requestToken) {
+	if (!refreshGenerationIsCurrent(childNumber, generation) || requestToken == null) return false
+	def activeRequestToken = state.refreshState[childNumber]["requestToken"]
+	return activeRequestToken != null && (activeRequestToken as Long) == (requestToken as Long)
+}
+
+private void finishRefreshGeneration(String childNumber, generation, String phase) {
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return
+	Map refreshState = state.refreshState[childNumber] as Map
+	refreshState["phase"] = phase
+	state.refreshState[childNumber] = refreshState
+}
+
+private Long beginStatusRequest(String childNumber, generation) {
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return null
+	Map refreshState = state.refreshState[childNumber] as Map
+	Long requestToken = ((refreshState["requestToken"] ?: 0) as Long) + 1L
+	refreshState["requestToken"] = requestToken
+	refreshState["phase"] = "requesting"
+	state.refreshState[childNumber] = refreshState
+	return requestToken
+}
+
+private Boolean claimStatusCallback(String childNumber, generation, requestToken) {
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return false
+	Map refreshState = state.refreshState[childNumber] as Map
+	if (refreshState["phase"] != "requesting") return false
+	if (refreshState["requestToken"] == null || (refreshState["requestToken"] as Long) != (requestToken as Long)) return false
+	refreshState["phase"] = "processing"
+	state.refreshState[childNumber] = refreshState
+	return true
+}
+
+private Long reserveRefreshRetry(String childNumber, generation) {
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return null
+	Map refreshState = state.refreshState[childNumber] as Map
+	Long retryToken = ((refreshState["retryToken"] ?: 0) as Long) + 1L
+	refreshState["retryToken"] = retryToken
+	refreshState["phase"] = "retry_wait"
+	state.refreshState[childNumber] = refreshState
+	return retryToken
+}
+
+private Boolean claimRefreshRetry(String childNumber, generation, retryToken) {
+	if (!refreshGenerationIsCurrent(childNumber, generation)) return false
+	Map refreshState = state.refreshState[childNumber] as Map
+	if (refreshState["phase"] != "retry_wait") return false
+	if (refreshState["retryToken"] == null || (refreshState["retryToken"] as Long) != (retryToken as Long)) return false
+	refreshState["phase"] = "preparing"
+	state.refreshState[childNumber] = refreshState
+	return true
+}
+
+private void scheduleRefreshRetry(cd, Integer delay, Boolean fromUnauth, Integer transientRetry = 0, refreshGeneration = null) {
+	String childNumber = childKey(cd)
+	Long generation = refreshGeneration == null ? beginRefreshGeneration(childNumber) : (refreshGeneration as Long)
+	Long retryToken = reserveRefreshRetry(childNumber, generation)
+	if (retryToken == null) {
+		if (debugOutput) log.debug "Not scheduling stale refresh retry generation ${generation} for ${cd.displayName}"
+		return
+	}
+	runIn(delay, "refreshFromRunin", [overwrite:false, data:[dni:cd.deviceNetworkId, fromUnauth:fromUnauth, transientRetry:transientRetry, refreshGeneration:generation, retryToken:retryToken]])
 }
 
 def refreshFromRunin(data) {
@@ -1148,8 +1633,15 @@ def refreshFromRunin(data) {
 	if (cdd instanceof List) cdd = cdd[0]
 	def cd = getChildDevice(cdd)
 	if (!cd) return
-	if (debugOutput) log.debug "Calling refresh after TCC failure for ${cd.displayName}"
-	componentDoRefresh(cd, data?.fromUnauth == true)
+	String childNumber = childKey(cd)
+	Long generation = (data?.refreshGeneration ?: 0) as Long
+	Long retryToken = (data?.retryToken ?: 0) as Long
+	if (!claimRefreshRetry(childNumber, generation, retryToken)) {
+		if (debugOutput) log.debug "Ignoring stale or duplicate refresh retry generation ${generation}, token ${retryToken} for ${cd.displayName}"
+		return
+	}
+	if (debugOutput) log.debug "Calling refresh after TCC failure for ${cd.displayName}; generation ${generation}, retry token ${retryToken}"
+	componentDoRefresh(cd, data?.fromUnauth == true, (data?.transientRetry ?: 0) as Integer, generation)
 }
 
 
