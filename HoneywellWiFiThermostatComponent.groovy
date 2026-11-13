@@ -14,6 +14,9 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  *
+ * csteele: v2.0.10  Remove the obsolete Zero/Four Emergency Heat command preference. The Parent
+ *                    now follows Honeywell's fixed SystemSwitch enum and applies the capability
+ *                    check consistently to every thermostat-mode command path.
  * csteele: v2.0.9   Send Child preferences to the Parent before the first refresh. 
  *                   Parse poll intervals safely, disable recurring polling cleanly when Off, and spread thermostat schedules across the minute. 
  *                   Suppress null description logs, declare hysteresis, and make preference/local types consistent.
@@ -37,7 +40,7 @@
  *                    added fanOperatingState Attribute.
 **/
 
- public static String version()     {  return "v2.0.9"  }
+ public static String version()     {  return "v2.0.10"  }
 
 
 metadata {
@@ -76,7 +79,7 @@ metadata {
 /* -= Attribute List =-
  	[thermostatFanMode, humidifierLowerLimit, supportedThermostatFanModes, supportedThermostatModes, followSchedule, humidifierSetPoint, thermostatSetpoint, 
  	coolingSetpoint, humidifierUpperLimit, outdoorHumidity, temperature, outdoorTemperature, humidifierStatus, lastUpdate, thermostatMode, fanOperatingState, 
- 	thermostatOperatingState, heatingSetpoint, humidity, temperature, TCCstatus, emergencyHeatCommand]
+	thermostatOperatingState, heatingSetpoint, humidity, temperature, TCCstatus]
 
    -= Command List =-
  	[auto, cool, coolLevelDown, coolLevelUp, emergencyHeat, fanAuto, fanCirculate, fanOn, heat, heatLevelDown, heatLevelUp, off, 
@@ -92,7 +95,6 @@ metadata {
        input name: "enableHumidity", type: "enum", title: "Do you have the optional Humidity sensor and want to enable it?", options: ["Yes", "No"], required: false, defaultValue: "No"
        input name: "setPermHold", type: "enum", title: "Will Setpoints be temporary or permanent?", options: ["Temporary", "Permanent"], required: false, defaultValue: "Temporary"
        input name: "pollIntervals", type: "enum", title: "Set the Poll Interval.", options: [0:"off", 60:"1 minute", 120:"2 minutes", 180:"3 minutes", 300:"5 minutes",600:"10 minutes",900:"15 minutes",1800:"30 minutes",3600:"60 minutes"], required: true, defaultValue: "600"
-       input name: "emergencyHeatCommand", type: "enum", title: "Set the Emergency Heat Command Value.", options: [0:"Zero", 4:"Four"], required: true, defaultValue: "4"
        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
 }
@@ -107,7 +109,7 @@ void updated() {
 void parentUpdate() {
 	Integer permHoldCode = setPermHold == "Permanent" ? 2 : 1
 	String cd = device.deviceNetworkId
-	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, permHoldCode, pollIntervals, emergencyHeatCommand)
+	parent.setParams(cd, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, permHoldCode, pollIntervals)
 }
 
 
