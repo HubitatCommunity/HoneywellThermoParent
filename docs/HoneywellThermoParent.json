@@ -1,11 +1,11 @@
 {
         "packageName": "Honeywell Thermo Parent",
         "author": "CSteele",
-        "version": "2.0.22",
+        "version": "2.0.23",
         "description": "Honeywell Total Connect Comfort WiFi(cloud) Thermostat Driver",
         "minimumHEVersion": "2.0.0",
-        "dateReleased": "2026-11-05",
-        "releaseNotes": "v2.0.22  Retry one transient status GET or command POST after 60 seconds while retaining the existing TCC session. Only explicit authentication rejection can discard the session and trigger a login. Log caught status-response details at debug level so expected Honeywell timeouts do not create red error-log entries.\n         Add selectable Debug logging time.\n         Mask Honeywell Device IDs in driver-owned diagnostics while retaining the full values in preferences, Parent state, and HTTP requests.\n         Isolate command accumulation, immutable in-flight delivery, bounded retries, retained failures, and acknowledgements per thermostat child and command ID.\n         Give every child refresh a generation so newer manual or scheduled refreshes invalidate stale callbacks and queued retries without affecting other children.\n         Correct the legacy humidifier parser's CancelMin response-line type and identify its setpoint, upper-limit, and lower-limit events accurately.",
+        "dateReleased": "2026-11-12",
+        "releaseNotes": "v2.0.23  Match Honeywell's SystemSwitch enum: decode 0 as Emergency Heat, decode both 4 (auto heat) and 5 (auto cool) as Auto, send Emergency Heat as 0, and send Auto as 4. \nv2.0.22  Retry one transient status GET or command POST after 60 seconds while retaining the existing TCC session. Only explicit authentication rejection can discard the session and trigger a login. Log caught status-response details at debug level so expected Honeywell timeouts do not create red error-log entries.\n         Add selectable Debug logging time.\n         Mask Honeywell Device IDs in driver-owned diagnostics while retaining the full values in preferences, Parent state, and HTTP requests.\n         Isolate command accumulation, immutable in-flight delivery, bounded retries, retained failures, and acknowledgements per thermostat child and command ID.\n         Give every child refresh a generation so newer manual or scheduled refreshes invalidate stale callbacks and queued retries without affecting other children.\n         Correct the legacy humidifier parser's CancelMin response-line type and identify its setpoint, upper-limit, and lower-limit events accurately.",
         "tags": "Tools & Utilities",
         "drivers": [{
                 "id": "f991de80-143f-49c8-a127-7996e972ed58",
