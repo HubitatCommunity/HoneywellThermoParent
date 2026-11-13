@@ -16,6 +16,11 @@
  *
  *
  *
+ * csteele: v2.0.23  Match Honeywell's SystemSwitch enum: decode 0 as Emergency Heat, decode both
+ *                    4 (auto heat) and 5 (auto cool) as Auto, send Emergency Heat as 0, and send
+ *                    Auto as 4. Preserve the prior displayed mode and warn when Honeywell returns
+ *                    an unsupported switch value. Enforce each child's Emergency Heat capability
+ *                    for every command path and ignore the retired Zero/Four child preference.
  * csteele: v2.0.22  Retry one transient status GET or command POST after 60 seconds while retaining
  *                    the existing TCC session. Only explicit authentication rejection can discard
  *                    the session and trigger a login. Log caught status-response details at debug
@@ -107,12 +112,11 @@ import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 
- public static String version()	{  return "v2.0.22"  }
+ public static String version()	{  return "v2.0.23"  }
  public static String tccSite() 	{  return "mytotalconnectcomfort.com"  }
  public static String type() 		{  return "Thermostat"  }
 
-@Field static Map<String, Map> modeMap4 = [auto:5, cool:3, heat:1, off:2, 'emergency heat':4]
-@Field static Map<String, Map> modeMap0 = [auto:5, cool:3, heat:1, off:2, 'emergency heat':0]
+@Field static Map<String, Integer> modeMap = [auto:4, cool:3, heat:1, off:2, 'emergency heat':0]
 @Field static Map<String, Map> fanMap = [auto:0, on:1, circulate:2, followSchedule:3] 
 
 // Cookies and session metadata are owned by the Parent so every thermostat child can reuse
@@ -385,7 +389,6 @@ void componentInitialize(cd) {
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value: 'off', descriptionText:"${cd.displayName} Thermostat Mode: Off"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatOperatingState", value: 'idle', descriptionText:"${cd.displayName} thermostatOperatingState: Idle"]])
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatSetpoint", value: heat_sp, unit:"°${location.temperatureScale}", descriptionText:"${cd.displayName} thermostatSetpoint: 68"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"emergencyHeatCommand", value: 4, descriptionText:"${cd.displayName} emergencyHeatCommand"]])
 }
 
 // Thermostat mode section
@@ -411,26 +414,26 @@ void componentHeat(cd) {
 
 void componentEmergencyHeat(cd) {
 	if (descTextEnable) log.info "received Emergency Heat request from ${cd.displayName}"
-	Boolean allowed = emergencyHeatAllowed(cd)
-	if (allowed == true) {
-		if (debugOutput) log.debug "Set Emergency/Auxiliary Heat On"
-		setThermostatMode(cd, 'emergency heat')
-	} else if (allowed == null) {
-		log.warn "${cd.displayName}: Emergency Heat capability is not known yet. Refresh this thermostat and try again."
-	} else {
-		log.warn "${cd.displayName}: this thermostat reports that Emergency Heat is not allowed."
-	}
+	setThermostatMode(cd, 'emergency heat')
 }
 
 void setThermostatMode(cd, mode) {
 	if (debugOutput) log.debug "setThermostatMode: $mode"
 
-	String[] dniParts = cd.deviceNetworkId.split("[-_]")
-	def systemSwitch
-	if (state.childParamMap."${dniParts[2]}".emergencyHeatCommand == "0") {
-		systemSwitch = modeMap0.find{ mode == it.key }?.value }
-	else {
-		systemSwitch = modeMap4.find{ mode == it.key }?.value }
+	if (mode == 'emergency heat') {
+		Boolean allowed = emergencyHeatAllowed(cd)
+		if (allowed == null) {
+			log.warn "${cd.displayName}: Emergency Heat capability is not known yet. Refresh this thermostat and try again."
+			return
+		}
+		if (allowed == false) {
+			log.warn "${cd.displayName}: this thermostat reports that Emergency Heat is not allowed."
+			return
+		}
+		if (debugOutput) log.debug "Set Emergency/Auxiliary Heat On"
+	}
+
+	Integer systemSwitch = modeMap[mode]
 	if (systemSwitch == null) {
 		log.warn "${cd.displayName}: unsupported thermostat mode '$mode'"
 		return
@@ -653,7 +656,7 @@ def getStatusHandler (resp, data) {
 		else {
 			throw new IllegalStateException("HTTP ${responseStatus}")
 		}
-	}
+	    }
 	catch (e) {
 		if (sessionRejected) invalidateTccSession(data?.sid)
 		if (debugOutput) log.debug "getStatus response invalid for ${cd.displayName}: ${sanitizedTccFailure(e, honeywellDeviceIdFor(cd))}"
@@ -675,7 +678,7 @@ def getStatusHandler (resp, data) {
 				log.warn "${cd.displayName}: transient TCC status failure; waiting until the next poll."
 			}
 		}
-	}
+	    }
 }
 
 
@@ -738,11 +741,15 @@ def getStatusDistrib(cd, Map decodedResult) {
 	n = [ 0: 'auto', 2: 'circulate', 1: 'on', 3: 'followSchedule' ][fanMode]
 	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatFanMode", value:n, descriptionText:"${cd.displayName} Fan was Set to $n"]])
 
-	// 'emergency heat' can be a four or zero.
-	n = [ 1: 'heat', 2: 'off', 3: 'cool', 5: 'auto', 4: 'emergency heat', 0: 'emergency heat' ][switchPos] ?: 'auto' 
+	Integer switchPosition = switchPos == null ? null : switchPos as Integer
+	String thermostatMode = [0:'emergency heat', 1:'heat', 2:'off', 3:'cool', 4:'auto', 5:'auto'][switchPosition]
 	getChildDevice(cd.deviceNetworkId).parse([[name:"temperature", value:curTemp.round(2), descriptionText:"${cd.displayName} Temperature was Set to $curTemp", unit: "°${location.temperatureScale}"]])
-	getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value:n, descriptionText:"${cd.displayName} Mode was Set to $n"]])
-	cd.setLastRunningMode(n) // lastRunningMode in the Child
+	if (thermostatMode != null) {
+		getChildDevice(cd.deviceNetworkId).parse([[name:"thermostatMode", value:thermostatMode, descriptionText:"${cd.displayName} Mode was Set to $thermostatMode"]])
+		cd.setLastRunningMode(thermostatMode) // lastRunningMode in the Child
+	} else {
+		log.warn "${cd.displayName}: unhandled SystemSwitchPosition ${switchPos}; retaining the previous thermostat mode."
+	}
 
 	//Send events 
 	if (hasIndoorHumid == false) { curHumidity = 0 }
@@ -1199,8 +1206,8 @@ private Boolean tccCookieExpired(String raw) {
 
 // Value setting Section
 //
-// params passed in from each Child: DNI, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, setPermHold, pollIntervals, emergencyHeatCommand
-void setParams(cDNI, dev, hH, eOT, eH, sPH, pI, eHC) {
+// params passed in from each Child: DNI, honeywelldevice, haveHumidifier, enableOutdoorTemps, enableHumidity, setPermHold, pollIntervals
+void setParams(cDNI, dev, hH, eOT, eH, sPH, pI) {
 	String childNumber = childKeyFromDni(cDNI)
 	ensureChildMaps(childNumber)
 	state.childParamMap[childNumber].childDNI 			= cDNI
@@ -1210,9 +1217,15 @@ void setParams(cDNI, dev, hH, eOT, eH, sPH, pI, eHC) {
 	state.childParamMap[childNumber].enableHumidity		= eH
 	state.childParamMap[childNumber].setPermHold 		= sPH
 	state.childParamMap[childNumber].pollIntervals 		= pI
-	state.childParamMap[childNumber].emergencyHeatCommand 	= eHC
+	state.childParamMap[childNumber].remove("emergencyHeatCommand")
 
-	if (debugOutput) log.debug "ChildParams: $cDNI, ${maskedHoneywellDeviceId(dev)}, $hH, $eOT, $eH, $sPH, $pI, $eHC"
+	if (debugOutput) log.debug "ChildParams: $cDNI, ${maskedHoneywellDeviceId(dev)}, $hH, $eOT, $eH, $sPH, $pI"
+}
+
+// Compatibility for a v2.0.9 or older Child during a staggered/manual update. The former
+// Zero/Four value is intentionally ignored because Honeywell defines Emergency Heat as zero.
+void setParams(cDNI, dev, hH, eOT, eH, sPH, pI, ignoredEmergencyHeatCommand) {
+	setParams(cDNI, dev, hH, eOT, eH, sPH, pI)
 }
 
 private Semaphore commandStateLock(String childNumber) {
@@ -1420,7 +1433,7 @@ private void ensureStateMaps() {
 private void ensureChildMaps(String childNumber) {
 	ensureStateMaps()
 	if (state.childParamMap[childNumber] == null) {
-		state.childParamMap[childNumber] = [childDNI: null, honeywelldevice: null, haveHumidifier: null, enableOutdoorTemps: null, enableHumidity: null, setPermHold: null, pollIntervals: null, emergencyHeatCommand: null]
+		state.childParamMap[childNumber] = [childDNI: null, honeywelldevice: null, haveHumidifier: null, enableOutdoorTemps: null, enableHumidity: null, setPermHold: null, pollIntervals: null]
 	}
 	if (state.deviceSetting[childNumber] == null) {
 		state.deviceSetting[childNumber] = [SystemSwitch: null, StatusHeat: null, StatusCool: null, HeatSetpoint: null, CoolSetpoint: null, HeatNextPeriod: null, CoolNextPeriod: null, FanMode: null, TemporaryHoldUntilTime: null, VacationHold: null]
